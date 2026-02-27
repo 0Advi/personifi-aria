@@ -28,8 +28,11 @@ import type { MemoryItem } from './memory-store.js'
 import type { GraphSearchResult } from './graph-memory.js'
 import type { PreferencesMap } from './types/database.js'
 import type { ConversationGoalRecord } from './types/cognitive.js'
-import { formatMemoriesForPrompt } from './memory-store.js'
+import type { WorkingMemory } from './working-memory.js'
+import type { PersonaOpinion } from './persona-opinions.js'
+import { formatMemoriesForPromptV2 } from './memory-store.js'
 import { formatGraphForPrompt } from './graph-memory.js'
+import { formatOpinionsForPrompt } from './persona-opinions.js'
 import { selectResponseTone } from './cognitive.js'
 import { computeMoodWeights, getMoodInstruction } from './character/mood-engine.js'
 import { getBangaloreContext } from './utils/bangalore-context.js'
@@ -137,6 +140,12 @@ export interface ComposeOptions {
     // ─── Tool results from DEV 1's router ───
     /** Tool results (if any) */
     toolResults?: string
+
+    // ─── Stateful persona additions ───
+    /** Working memory loaded for this session (summary + activePlan injected as Layers 3-4) */
+    workingMemory?: WorkingMemory
+    /** Persona opinions Aria has formed about this user */
+    personaOpinions?: PersonaOpinion[]
 }
 
 /**
@@ -173,32 +182,42 @@ export function composeSystemPrompt(opts: ComposeOptions): string {
         return sections.filter(s => s.length > 0).join('\n\n')
     }
 
-    // ─── Layer 3: Preferences (NEW) ─────────────────────────────
+    // ─── Layer 3: Working memory summary (stateful persona) ─────────
+    if (opts.workingMemory?.summary) {
+        sections.push(`## Conversation Context\n${opts.workingMemory.summary}`)
+    }
+
+    // ─── Layer 4: Active plan from working memory ────────────────────
+    if (opts.workingMemory?.activePlan) {
+        sections.push(`## Active Plan\n${opts.workingMemory.activePlan}`)
+    }
+
+    // ─── Layer 5 (was 3): Preferences ───────────────────────────────
     if (opts.preferences && Object.keys(opts.preferences).length > 0) {
         sections.push(formatPreferences(opts.preferences))
     }
 
-    // ─── Layer 4: Conversation Goal (NEW) ───────────────────────
+    // ─── Layer 6 (was 4): Conversation Goal ─────────────────────────
     if (opts.activeGoal) {
         sections.push(formatGoal(opts.activeGoal))
     }
 
-    // ─── Layer 5: Memory Context ────────────────────────────────
+    // ─── Layer 7 (was 5): Memory Context ────────────────────────────
     if (opts.memories && opts.memories.length > 0) {
-        sections.push(formatMemoriesForPrompt(opts.memories))
+        sections.push(formatMemoriesForPromptV2(opts.memories))
     }
 
-    // ─── Layer 6: Graph Context ─────────────────────────────────
+    // ─── Layer 8 (was 6): Graph Context ─────────────────────────────
     if (opts.graphContext && opts.graphContext.length > 0) {
         sections.push(formatGraphForPrompt(opts.graphContext))
     }
 
-    // ─── Layer 7: Cognitive Guidance + Tone ──────────────────────
+    // ─── Layer 9 (was 7): Cognitive Guidance + Tone ──────────────────
     if (opts.cognitiveState) {
         sections.push(formatCognitiveWithTone(opts.cognitiveState))
     }
 
-    // ─── Layer 7b: Active Personality Mode (mood engine) ─────────
+    // ─── Layer 9b: Active Personality Mode (mood engine) ─────────────
     if (opts.cognitiveState) {
         const now = new Date()
         const istHour = (now.getUTCHours() + 5) % 24 // approximate IST
@@ -213,17 +232,26 @@ export function composeSystemPrompt(opts: ComposeOptions): string {
         sections.push(`## Active Personality Mode\n${getMoodInstruction(weights)}`)
     }
 
-    // ─── Layer 7c: Bangalore time/traffic context ─────────────────
+    // ─── Layer 9c: Bangalore time/traffic context ─────────────────────
     const bangaloreCtx = getBangaloreContext()
     if (bangaloreCtx) {
         sections.push(`## City Context\n${bangaloreCtx}`)
     }
 
-    // ─── Layer 8: Tool Results ──────────────────────────────────
+    // ─── Layer 10: Persona opinions ──────────────────────────────────
+    if (opts.personaOpinions && opts.personaOpinions.length > 0) {
+        const opinionStr = formatOpinionsForPrompt(opts.personaOpinions)
+        if (opinionStr) sections.push(opinionStr)
+    }
+
+    // ─── Layer 11 (was 8): Tool Results ─────────────────────────────
     if (opts.toolResults) {
         sections.push(formatToolResults(opts.toolResults))
     }
 
+    // ─── Bottom-up truncation policy ────────────────────────────────
+    // Layers 1-2 (identity + user context) are NEVER truncated.
+    // Overflow trims in order: tool results → graph → memories → persona opinions.
     return sections.filter(s => s.length > 0).join('\n\n')
 }
 

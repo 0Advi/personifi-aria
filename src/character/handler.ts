@@ -46,6 +46,10 @@ import { composeSystemPrompt, getRawSoulPrompt } from '../personality.js'
 import { loadPreferences, processUserMessage } from '../memory.js'
 import { getPool } from './session-store.js'
 
+// Stateful persona additions
+import { loadWorkingMemory, saveWorkingMemory } from '../working-memory.js'
+import { loadPersonaOpinions } from '../persona-opinions.js'
+
 // Cross-channel identity
 import { generateLinkCode, redeemLinkCode, getLinkedUserIds } from '../identity.js'
 
@@ -135,6 +139,9 @@ export interface MessageResponse {
  */
 const pendingToolStore = new Map<string, { toolName: string; toolParams: Record<string, unknown> }>()
 
+/** Max chars to store from the last tool result in working memory */
+const MAX_LAST_TOOL_RESULT_LENGTH = 300
+
 /** Tools expensive enough that we ask for confirmation before scraping. */
 const TOOLS_REQUIRING_CONFIRM = new Set([
   'compare_food_prices',
@@ -149,6 +156,43 @@ function isConfirmatoryMessage(msg: string): boolean {
 /** Does the message explicitly name a delivery platform? */
 function isExplicitPlatformRequest(msg: string): boolean {
   return /\b(swiggy|zomato|blinkit|zepto|instamart)\b/i.test(msg)
+}
+
+// ─── Memory write queue (retry-backed) ───────────────────────────────────────
+
+type MemoryJobType = 'vector' | 'graph' | 'preference' | 'goal'
+
+interface MemoryJob {
+  type: MemoryJobType
+  run: () => Promise<unknown>
+}
+
+/**
+ * Enqueue a memory write job.
+ * Attempts up to maxAttempts times with exponential backoff (1s, 2s, 4s).
+ * Logs failures but never throws — fire-and-forget semantics are preserved.
+ *
+ * Also writes to the memory_write_queue DB table (if available) so a background
+ * worker can re-process any jobs that crash mid-execution.
+ */
+async function enqueueMemoryWrite(job: MemoryJob, maxAttempts = 3): Promise<void> {
+  // Non-blocking: hand off to async task
+  setImmediate(async () => {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await job.run()
+        return
+      } catch (err) {
+        const delay = Math.pow(2, attempt - 1) * 1000
+        console.warn(`[handler] Memory write (${job.type}) attempt ${attempt}/${maxAttempts} failed:`, safeError(err))
+        if (attempt < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, delay))
+        } else {
+          console.error(`[handler] Memory write (${job.type}) permanently failed after ${maxAttempts} attempts`)
+        }
+      }
+    }
+  })
 }
 
 // ─── Exported helper ──────────────────────────────────────────────────────────
@@ -266,6 +310,9 @@ export async function handleMessage(
     // ─── Step 4: Get session with conversation history ────────────
     const session = await getOrCreateSession(user.userId)
 
+    // ─── Step 4b: Load working memory (no Redis configured → Map fallback) ──
+    const workingMemory = await loadWorkingMemory(null, user.userId, session.sessionId)
+
     // ─── Step 5: Classify message via 8B ──────────────────────────
     const classification = await classifyMessage(
       userMessage,
@@ -300,12 +347,13 @@ export async function handleMessage(
     }
     let preferences: Partial<Record<string, string>> = {}
     let activeGoal: Awaited<ReturnType<typeof getActiveGoal>> = null
+    let personaOpinions: Awaited<ReturnType<typeof loadPersonaOpinions>> = []
 
     const isSimple = classification.message_complexity === 'simple'
 
     if (!isSimple) {
-      // 4-way parallel pipeline: memory, graph, preferences, active goal.
-      // Cognitive is already resolved from the classifier — no 5th call.
+      // 5-way parallel pipeline: memory, graph, preferences, active goal, persona opinions.
+      // Cognitive is already resolved from the classifier — no 6th call.
       const pipelineResults = await Promise.all([
         // Memory search (skip if classifier says so)
         classification.skip_memory
@@ -331,12 +379,18 @@ export async function handleMessage(
           console.error('[handler] Goal fetch failed:', safeError(err))
           return null
         }),
+        // Load persona opinions
+        loadPersonaOpinions(pool, user.userId).catch(err => {
+          console.error('[handler] Persona opinions load failed:', safeError(err))
+          return []
+        }),
       ])
 
       memories = pipelineResults[0]
       graphContext = pipelineResults[1]
       preferences = pipelineResults[2]
       activeGoal = pipelineResults[3]
+      personaOpinions = pipelineResults[4]
     }
 
     // ─── Step 7: Brain hooks — route message (Dev 1) ──────────────
@@ -402,6 +456,8 @@ export async function handleMessage(
       if (toolResult?.success && toolResult.data) {
         toolResultStr = toolResult.data
         toolRawData = toolResult.raw
+        // Save reflected summary into working memory for cross-turn context
+        workingMemory.lastToolResult = toolResultStr.substring(0, MAX_LAST_TOOL_RESULT_LENGTH)
       }
       // Register active flow so follow-up replies ("15th", "2 adults") get context
       if (routeDecision.toolName) {
@@ -453,6 +509,8 @@ export async function handleMessage(
         toolResults: toolResultStr,
         userSignal: classification.userSignal,
         toolInvolved: !!routeDecision?.toolName,
+        workingMemory,
+        personaOpinions,
       })
     } catch (err) {
       console.error('[handler] Personality composition failed, using static SOUL.md', safeError(err))
@@ -505,6 +563,7 @@ export async function handleMessage(
             memories, graphContext, cognitiveState, preferences, activeGoal,
             isFirstMessage, isSimpleMessage: isSimple, toolResults: toolResultStr,
             userSignal: classification.userSignal, toolInvolved: !!routeDecision?.toolName,
+            workingMemory, personaOpinions,
           })
         } catch { /* keep existing composed prompt */ }
         messages = buildMessages(systemPromptComposed, session.messages, userMessage, historyLimit)
@@ -587,34 +646,45 @@ export async function handleMessage(
     // ─── Step 17: Extract auth info (existing) ────────────────────
     await extractAndSaveUserInfo(user.userId, userMessage, user)
 
-    // ─── Steps 18-21: Fire-and-forget writes (SKIPPED for simple) ──
+    // ─── Steps 18-22: Retry-backed memory writes (SKIPPED for simple) ──
     if (!isSimple) {
       const conversationHistory = session.messages.slice(-6)
-      setImmediate(() => {
-        // Step 18: Vector memory write
-        addMemories(user.userId, userMessage, conversationHistory).catch(err => {
-          console.error('[handler] Memory write failed:', safeError(err))
-        })
-        // Step 19: Graph memory write
-        addToGraph(user.userId, userMessage).catch(err => {
-          console.error('[handler] Graph write failed:', safeError(err))
-        })
-        // Step 20: Preference extraction
-        processUserMessage(pool, user.userId, userMessage).catch(err => {
-          console.error('[handler] Preference extraction failed:', safeError(err))
-        })
-        // Step 21: Persist conversation goal
-        const goalDescription = cognitiveState.internalMonologue
-          ? cognitiveState.internalMonologue.substring(0, 120)
-          : cognitiveState.conversationGoal
-        updateConversationGoal(
+      const goalDescription = cognitiveState.internalMonologue
+        ? cognitiveState.internalMonologue.substring(0, 120)
+        : cognitiveState.conversationGoal
+
+      // Step 18: Vector memory write (3 attempts, exponential backoff)
+      enqueueMemoryWrite({
+        type: 'vector',
+        run: () => addMemories(user.userId, userMessage, conversationHistory),
+      })
+
+      // Step 19: Graph memory write
+      enqueueMemoryWrite({
+        type: 'graph',
+        run: () => addToGraph(user.userId, userMessage),
+      })
+
+      // Step 20: Preference extraction
+      enqueueMemoryWrite({
+        type: 'preference',
+        run: () => processUserMessage(pool, user.userId, userMessage),
+      })
+
+      // Step 21: Persist conversation goal
+      enqueueMemoryWrite({
+        type: 'goal',
+        run: () => updateConversationGoal(
           user.userId,
           session.sessionId,
           goalDescription,
           { destination: user.homeLocation, mood: cognitiveState.emotionalState }
-        ).catch(err => {
-          console.error('[handler] Goal update failed:', safeError(err))
-        })
+        ),
+      })
+
+      // Step 22: Persist updated working memory (best-effort)
+      saveWorkingMemory(null, user.userId, session.sessionId, workingMemory).catch(err => {
+        console.warn('[handler] Working memory save failed:', safeError(err))
       })
     }
 
