@@ -1,6 +1,7 @@
 
 import type { BrainHooks, RouteContext, RouteDecision, ToolResult } from '../hooks.js'
 import { getBodyHooks } from '../hook-registry.js'
+import { reflectOnToolResult } from './reflect.js'
 
 export const brainHooks: BrainHooks = {
     async routeMessage(context: RouteContext): Promise<RouteDecision> {
@@ -39,12 +40,29 @@ export const brainHooks: BrainHooks = {
             const bodyHooks = getBodyHooks()
             const result = await bodyHooks.executeTool(decision.toolName, decision.toolParams)
 
-            // Format result for Layer 8 injection
+            // Build raw JSON string as the safe fallback
             let formattedData = ''
             if (result.success) {
                 formattedData = JSON.stringify(result.data, null, 2)
             } else {
                 formattedData = `Tool execution failed: ${result.error || 'Unknown error'}`
+            }
+
+            // Reflection pass: use Tier 1 (8B) to validate output and extract key facts.
+            // Falls back to raw formattedData if reflection fails.
+            if (result.success && result.data != null) {
+                const reflection = await reflectOnToolResult(
+                    context.userMessage,
+                    decision.toolName,
+                    result.data
+                )
+                if (reflection?.summary) {
+                    // Use the structured summary for Layer 8 — keeps prompt tight
+                    formattedData = reflection.summary
+                    if (reflection.ariaShouldMention) {
+                        formattedData += '\n[Note: data may be partial — mention this to the user if relevant]'
+                    }
+                }
             }
 
             return {

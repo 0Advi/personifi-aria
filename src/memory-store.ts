@@ -27,6 +27,8 @@ export interface MemoryItem {
     createdAt?: string
     updatedAt?: string
     metadata?: Record<string, any>
+    /** Importance score 0–1 (from enhanced-memories migration) */
+    importance?: number
 }
 
 export interface MemoryAction {
@@ -539,5 +541,55 @@ export function formatMemoriesForPrompt(memories: MemoryItem[]): string {
     if (memories.length === 0) return ''
 
     const lines = memories.map(m => `• ${m.memory}`)
+    return `## What I Remember About You\n${lines.join('\n')}`
+}
+
+/**
+ * Format memories using composite scoring: cosine*0.4 + recency*0.3 + importance*0.3.
+ * Applies temporal decay (half-life 30 days), filters out finalScore < 0.3,
+ * deduplicates, and returns the top 5.
+ *
+ * Falls back gracefully to the original formatMemoriesForPrompt behaviour when
+ * the extra columns (importance, last_accessed) are not yet populated.
+ */
+export function formatMemoriesForPromptV2(memories: MemoryItem[]): string {
+    if (memories.length === 0) return ''
+
+    const now = Date.now()
+    const HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+
+    const scored = memories.map(m => {
+        // Cosine similarity score (0–1), default 0.5 if unavailable
+        const cosine = typeof m.score === 'number' ? m.score : 0.5
+
+        // Recency score via exponential decay
+        const ageMs = m.updatedAt
+            ? now - new Date(m.updatedAt).getTime()
+            : HALF_LIFE_MS * 2
+        const recency = Math.exp(-ageMs / HALF_LIFE_MS)
+
+        // Importance score (new column; defaults to 0.5 when not yet set)
+        const importance = typeof m.importance === 'number' ? m.importance : 0.5
+
+        const finalScore = cosine * 0.4 + recency * 0.3 + importance * 0.3
+        return { ...m, finalScore }
+    })
+
+    // Filter low-confidence memories, deduplicate by memory text, take top 5
+    const seen = new Set<string>()
+    const filtered = scored
+        .filter(m => m.finalScore >= 0.3)
+        .sort((a, b) => b.finalScore - a.finalScore)
+        .filter(m => {
+            const key = m.memory.toLowerCase().substring(0, 60)
+            if (seen.has(key)) return false
+            seen.add(key)
+            return true
+        })
+        .slice(0, 5)
+
+    if (filtered.length === 0) return ''
+
+    const lines = filtered.map(m => `• ${m.memory}`)
     return `## What I Remember About You\n${lines.join('\n')}`
 }
