@@ -32,7 +32,7 @@ interface ReflectionJSON {
 
 const REFLECTION_MODEL = 'llama-3.1-8b-instant'
 const MAX_RAW_CHARS = 3500
-const REFLECTION_TIMEOUT_MS = 1800
+const REFLECTION_TIMEOUT_MS = 3500
 
 let groq: Groq | null = null
 

@@ -56,23 +56,36 @@ function delay(ms: number): Promise<void> {
  * @param fn    Zero-argument async function wrapping the Groq call
  * @param label Short label for log lines (e.g. 'groq-70b', 'groq-8b-classify')
  */
-export async function withGroqRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+export interface RetryOptions {
+    /** Maximum number of retries (default: 2 = 3 total attempts) */
+    maxRetries?: number
+    /** Base delay in ms for exponential backoff (default: 500) */
+    baseDelayMs?: number
+}
+
+export async function withGroqRetry<T>(
+    fn: () => Promise<T>,
+    label: string,
+    options?: RetryOptions,
+): Promise<T> {
+    const maxRetries = options?.maxRetries ?? MAX_RETRIES
+    const baseDelay = options?.baseDelayMs ?? BASE_DELAY_MS
     let lastErr: unknown
 
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
             return await fn()
         } catch (err) {
             lastErr = err
 
-            if (attempt === MAX_RETRIES || !isRetryable(err)) {
+            if (attempt === maxRetries || !isRetryable(err)) {
                 throw err
             }
 
-            const waitMs = Math.min(BASE_DELAY_MS * Math.pow(2, attempt), MAX_DELAY_MS)
+            const waitMs = Math.min(baseDelay * Math.pow(2, attempt), MAX_DELAY_MS)
             const status = (err as any)?.status ?? '?'
             console.warn(
-                `[retry] ${label} attempt ${attempt + 1}/${MAX_RETRIES} failed` +
+                `[retry] ${label} attempt ${attempt + 1}/${maxRetries} failed` +
                 ` (status: ${status}), retrying in ${waitMs}ms`
             )
             await delay(waitMs)

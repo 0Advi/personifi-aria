@@ -293,7 +293,12 @@ export async function classifyMessage(
                 }
             }
         }
-        console.error('[cognitive] Classification failed, using defaults:', error)
+        // Rate-limit exhaustion — log cleanly instead of dumping full error
+        if (error?.status === 429) {
+            console.warn('[cognitive] Classifier rate-limited after all retries, using default classification')
+        } else {
+            console.error('[cognitive] Classification failed, using defaults:', error)
+        }
         return getDefaultClassification()
     }
 }
@@ -371,29 +376,22 @@ export async function updateConversationGoal(
             return null
         }
 
-        // Update-then-insert: avoids needing a partial unique index
-        const updated = await pool.query(
-            `UPDATE conversation_goals
-             SET goal = $1,
-                 context = $2,
-                 source = 'classifier',
-                 updated_at = NOW()
-             WHERE user_id = $3
-               AND session_id = $4
-               AND status = 'active'
-               AND COALESCE(source, 'classifier') = 'classifier'
-             RETURNING *`,
-            [newGoal.trim(), JSON.stringify(context), userId, sessionId]
-        )
-        if (updated.rows.length > 0) return updated.rows[0]
-
-        const inserted = await pool.query(
-            `INSERT INTO conversation_goals (user_id, session_id, goal, status, context, goal_type, priority, source)
+        // Single atomic UPSERT — avoids UPDATE+INSERT race condition that caused
+        // duplicate key errors (23505) on concurrent messages in the same session.
+        const result = await pool.query(
+            `INSERT INTO conversation_goals
+               (user_id, session_id, goal, status, context, goal_type, priority, source)
              VALUES ($1, $2, $3, 'active', $4, 'general', 5, 'classifier')
+             ON CONFLICT ON CONSTRAINT conversation_goals_user_session_unique
+             DO UPDATE SET
+               goal       = EXCLUDED.goal,
+               context    = EXCLUDED.context,
+               source     = 'classifier',
+               updated_at = NOW()
              RETURNING *`,
             [userId, sessionId, newGoal.trim(), JSON.stringify(context)]
         )
-        return inserted.rows[0] || null
+        return result.rows[0] || null
     } catch (error) {
         console.error('[cognitive] Goal update failed:', error)
         return null
