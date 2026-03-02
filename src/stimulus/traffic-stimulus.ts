@@ -131,10 +131,11 @@ async function fetchRoutesApiTraffic(location: string): Promise<TrafficStimulusS
     const apiKey = process.env.GOOGLE_MAPS_API_KEY
     if (!apiKey) return null
 
+    // Current probe corridor is tuned for Bengaluru; use Distance Matrix fallback for other cities.
+    if (!isBengaluru(location)) return null
+
     // Use two well-known Bengaluru corridors as a probe route for meaningful traffic signal
-    const probeRoutes = isBengaluru(location)
-        ? { origin: '12.9352,77.6245', destination: '12.9698,77.7500' } // Silk Board → Whitefield
-        : { origin: location, destination: location }
+    const probeRoutes = { origin: '12.9352,77.6245', destination: '12.9698,77.7500' } // Silk Board → Whitefield
 
     try {
         const body = {

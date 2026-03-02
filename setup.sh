@@ -677,7 +677,7 @@ tool_coverage_audit() {
     echo -e "  ${BOLD}🧭 Tool Coverage Audit (Env → Tool Readiness)${RESET}"
     echo ""
 
-    local places maps weather rapid traffic festival
+    local places maps weather rapid festival
     places=$(get_env_value "GOOGLE_PLACES_API_KEY")
     maps=$(get_env_value "GOOGLE_MAPS_API_KEY")
     weather=$(get_env_value "OPENWEATHERMAP_API_KEY")
