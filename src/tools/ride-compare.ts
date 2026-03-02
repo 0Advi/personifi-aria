@@ -223,11 +223,11 @@ async function getDistanceMatrix(origin: string, destination: string): Promise<D
         return { ...cached.result, source: 'cache' }
     }
 
-    const apiKey = process.env.GOOGLE_PLACES_API_KEY
+    const apiKey = process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY
     if (!apiKey) {
         const fallback = haversineEstimate(origin, destination)
         if (fallback) return fallback
-        throw new Error('Google Places API key is not configured and location lookup failed.')
+        throw new Error('Google API key is not configured (set GOOGLE_PLACES_API_KEY or GOOGLE_MAPS_API_KEY) and location lookup failed.')
     }
 
     try {

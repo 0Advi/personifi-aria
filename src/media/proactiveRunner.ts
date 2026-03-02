@@ -71,6 +71,19 @@ interface ProactiveDecision {
     text_only_message?: string | null
 }
 
+async function filterReelsByRejections<T extends { caption?: string; title?: string }>(
+    userId: string,
+    reels: T[],
+): Promise<T[]> {
+    const rejections = await getActiveRejections(userId).catch(() => new Set<string>())
+    if (rejections.size === 0) return reels
+
+    return reels.filter(reel => {
+        const text = `${reel.caption ?? ''} ${reel.title ?? ''}`.toLowerCase()
+        return !Array.from(rejections).some(rej => text.includes(rej))
+    })
+}
+
 // ─── Activity Tracking (in-memory, resets on restart which is fine) ─────────
 
 /** Tracks when each user last sent us a message */
@@ -382,7 +395,8 @@ async function trySendWeatherStimulus(
     const caption = weatherMessage(weather.stimulus, weather.temperatureC, weather.condition)
 
     const reels = await fetchReels(hashtag, userId, 4).catch(() => [])
-    const candidate = reels.length > 0 ? await pickBestReel(reels, userId) : null
+    const filteredReels = await filterReelsByRejections(userId, reels)
+    const candidate = filteredReels.length > 0 ? await pickBestReel(filteredReels, userId) : null
 
     let sent = false
     if (candidate) {
@@ -439,7 +453,8 @@ async function trySendTrafficStimulus(
     const hashtag = trafficHashtag(traffic)
 
     const reels = await fetchReels(hashtag, userId, 4).catch(() => [])
-    const candidate = reels.length > 0 ? await pickBestReel(reels, userId) : null
+    const filteredReels = await filterReelsByRejections(userId, reels)
+    const candidate = filteredReels.length > 0 ? await pickBestReel(filteredReels, userId) : null
 
     let sent = false
     if (candidate) {
@@ -485,7 +500,8 @@ async function trySendFestivalStimulus(
     const hashtag = festivalHashtag(festival)
 
     const reels = await fetchReels(hashtag, userId, 4).catch(() => [])
-    const candidate = reels.length > 0 ? await pickBestReel(reels, userId) : null
+    const filteredReels = await filterReelsByRejections(userId, reels)
+    const candidate = filteredReels.length > 0 ? await pickBestReel(filteredReels, userId) : null
 
     let sent = false
     if (candidate) {
@@ -652,8 +668,9 @@ async function runProactiveForUser(userId: string, chatId: string): Promise<void
 
     // ── media paths (reel + image_text) ─────────────────────────────────────
     const reels = await fetchReels(hashtag, userId, 8)
+    const filteredReels = await filterReelsByRejections(userId, reels)
 
-    if (reels.length === 0) {
+    if (filteredReels.length === 0) {
         // Fallback to text-only if no media found
         const fallback = decision.text_only_message || decision.caption
         if (fallback) {
@@ -667,12 +684,12 @@ async function runProactiveForUser(userId: string, chatId: string): Promise<void
     }
 
     // Split pool: prefer images for image_text, videos for reels
-    const imagePool = reels.filter(r => r.type === 'image')
-    const videoPool = reels.filter(r => r.type === 'video')
+    const imagePool = filteredReels.filter(r => r.type === 'image')
+    const videoPool = filteredReels.filter(r => r.type === 'video')
     const preferImages = contentType === 'image_text'
     const primaryPool = preferImages
-        ? (imagePool.length > 0 ? imagePool : reels)
-        : (videoPool.length > 0 ? videoPool : reels)
+        ? (imagePool.length > 0 ? imagePool : filteredReels)
+        : (videoPool.length > 0 ? videoPool : filteredReels)
 
     const bestReel = await pickBestReel(primaryPool, userId)
     if (!bestReel) {

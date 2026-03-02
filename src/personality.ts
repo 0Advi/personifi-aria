@@ -37,6 +37,9 @@ import { computeMoodWeights, getMoodInstruction } from './character/mood-engine.
 import { getCityContext } from './utils/bangalore-context.js'
 import { selectStrategy, formatStrategyForPrompt } from './influence-engine.js'
 import { formatAgendaForPrompt } from './agenda-planner/formatter.js'
+import { getWeatherState } from './weather/weather-stimulus.js'
+import { getTrafficState } from './stimulus/traffic-stimulus.js'
+import { getFestivalState } from './stimulus/festival-stimulus.js'
 
 // ─── SOUL.md Cache ──────────────────────────────────────────────────────────
 
@@ -53,6 +56,39 @@ const PROACTIVE_GREETING_DIRECTIVE = `## Proactive Response Priority
 When real-time data is available, lead with one specific recommendation grounded in that data.
 Avoid generic openers like "what are you in the mood for?" or "what's on your mind?".
 End with one concrete action question (yes/no or a clear next step).`
+
+function buildEnvironmentalContext(location?: string): string {
+    const city = location?.trim() || 'Bengaluru'
+    const weather = getWeatherState(city)
+    const traffic = getTrafficState(city)
+    const festival = getFestivalState(city)
+
+    const lines: string[] = []
+
+    if (weather) {
+        lines.push(`Weather: ${weather.temperatureC}°C, ${weather.condition}${weather.isRaining ? ' (raining now)' : ''}.`)
+        if (weather.isRaining) {
+            lines.push('Behavioral hint: prefer indoor plans, delivery, or short commutes.')
+        }
+    }
+
+    if (traffic && traffic.severity !== 'clear') {
+        const corridors = traffic.affectedCorridors.slice(0, 2).join(', ')
+        lines.push(`Traffic: ${traffic.severity} delays (~${traffic.durationMinutes} min)${corridors ? ` around ${corridors}` : ''}.`)
+        lines.push('Behavioral hint: suggest nearby or walkable options over long rides.')
+    }
+
+    if (festival?.active && festival.festival) {
+        lines.push(`Festival: ${festival.festival.name} is active${festival.daysUntil > 0 ? ` in ${festival.daysUntil} days` : ' today'}.`)
+        lines.push('Behavioral hint: weave festival context naturally into recommendations.')
+    }
+
+    if (lines.length === 0) {
+        return ''
+    }
+
+    return `## Environmental Context\n${lines.join('\n')}`
+}
 
 /**
  * Load and cache SOUL.md, auto-reloading on file change.
@@ -295,6 +331,11 @@ export function composeSystemPrompt(opts: ComposeOptions): string {
     const cityCtx = getCityContext(opts.homeLocation)
     if (cityCtx) {
         sections.push(`## City Context\n${cityCtx}`)
+    }
+
+    const envCtx = buildEnvironmentalContext(opts.homeLocation)
+    if (envCtx) {
+        sections.push(envCtx)
     }
 
     const shouldInjectProactiveGreetingDirective =

@@ -51,7 +51,8 @@ CORE_KEYS=(
     "GROQ_API_KEY|Groq LLM (console.groq.com)|required"
     "GEMINI_API_KEY|Google Gemini (LLM fallback)|required"
     "DATABASE_URL|PostgreSQL connection URL|required"
-    "GOOGLE_PLACES_API_KEY|Google Places API|required"
+    "GOOGLE_PLACES_API_KEY|Google Places API key (primary; optional if GOOGLE_MAPS_API_KEY is set)|optional"
+    "GOOGLE_MAPS_API_KEY|Google Maps API key (can be used as single key for maps/places stack)|optional"
 )
 
 CHANNEL_KEYS=(
@@ -73,6 +74,10 @@ TRAVEL_KEYS=(
     "SERPAPI_KEY|SerpAPI (Google fallback)|optional"
     "RAPIDAPI_KEY|RapidAPI (Hotels/Reels/Scrapers)|required"
     "OPENWEATHERMAP_API_KEY|OpenWeatherMap API|optional"
+    "TRAFFIC_API_KEY|Google Distance Matrix traffic probe (stimulus)|optional"
+    "FESTIVAL_API_KEY|Calendarific API (festival stimulus enrichment)|optional"
+    "DEFAULT_LAT|Default latitude for AQI/pollen/timezone tools|optional"
+    "DEFAULT_LNG|Default longitude for AQI/pollen/timezone tools|optional"
 )
 
 MCP_KEYS=(
@@ -453,6 +458,26 @@ validate_keys() {
         skip_count=$((skip_count + 1))
     fi
 
+    # --- Google Maps (fallback for several tools) ---
+    local gmaps_key
+    gmaps_key=$(get_env_value "GOOGLE_MAPS_API_KEY")
+    if is_key_set "$gmaps_key"; then
+        echo -ne "  ${BULLET} Google Maps Geocoding ... "
+        local gmaps_resp
+        gmaps_resp=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://maps.googleapis.com/maps/api/geocode/json?address=Bengaluru&key=${gmaps_key}" 2>/dev/null)
+        if [ "$gmaps_resp" = "200" ]; then
+            echo -e "${CHECK} Working (HTTP ${gmaps_resp})"
+            pass_count=$((pass_count + 1))
+        else
+            echo -e "${CROSS} Failed (HTTP ${gmaps_resp})"
+            fail_count=$((fail_count + 1))
+        fi
+    else
+        echo -e "  ${GRAY}⬚  Google Maps Geocoding — not configured, skipped${RESET}"
+        skip_count=$((skip_count + 1))
+    fi
+
     # --- OpenWeatherMap ---
     local owm_key
     owm_key=$(get_env_value "OPENWEATHERMAP_API_KEY")
@@ -470,6 +495,50 @@ validate_keys() {
         fi
     else
         echo -e "  ${GRAY}⬚  OpenWeatherMap — not configured, skipped${RESET}"
+        skip_count=$((skip_count + 1))
+    fi
+
+    # --- Traffic stimulus API (Distance Matrix) ---
+    local traffic_key
+    traffic_key=$(get_env_value "TRAFFIC_API_KEY")
+    if ! is_key_set "$traffic_key"; then
+        traffic_key="$gmaps_key"
+    fi
+    if is_key_set "$traffic_key"; then
+        echo -ne "  ${BULLET} Traffic API (Distance Matrix) ... "
+        local traffic_resp
+        traffic_resp=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://maps.googleapis.com/maps/api/distancematrix/json?origins=Bengaluru&destinations=Bengaluru&departure_time=now&traffic_model=best_guess&key=${traffic_key}" 2>/dev/null)
+        if [ "$traffic_resp" = "200" ]; then
+            echo -e "${CHECK} Working (HTTP ${traffic_resp})"
+            pass_count=$((pass_count + 1))
+        else
+            echo -e "${CROSS} Failed (HTTP ${traffic_resp})"
+            fail_count=$((fail_count + 1))
+        fi
+    else
+        echo -e "  ${GRAY}⬚  Traffic API — not configured, skipped${RESET}"
+        skip_count=$((skip_count + 1))
+    fi
+
+    # --- Festival API ---
+    local festival_key
+    festival_key=$(get_env_value "FESTIVAL_API_KEY")
+    if is_key_set "$festival_key"; then
+        echo -ne "  ${BULLET} Festival API (Calendarific) ... "
+        local festival_resp year
+        year=$(date +%Y)
+        festival_resp=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://calendarific.com/api/v2/holidays?api_key=${festival_key}&country=IN&year=${year}" 2>/dev/null)
+        if [ "$festival_resp" = "200" ]; then
+            echo -e "${CHECK} Working (HTTP ${festival_resp})"
+            pass_count=$((pass_count + 1))
+        else
+            echo -e "${CROSS} Failed (HTTP ${festival_resp})"
+            fail_count=$((fail_count + 1))
+        fi
+    else
+        echo -e "  ${GRAY}⬚  Festival API — not configured, skipped${RESET}"
         skip_count=$((skip_count + 1))
     fi
 
@@ -590,6 +659,59 @@ validate_keys() {
     echo ""
     echo -e "  ${BOLD}━━━ Results ━━━${RESET}"
     echo -e "  ${GREEN}Passed: ${pass_count}${RESET}  ${RED}Failed: ${fail_count}${RESET}  ${GRAY}Skipped: ${skip_count}${RESET}"
+    echo ""
+}
+
+tool_coverage_audit() {
+    echo ""
+    echo -e "  ${BOLD}🧭 Tool Coverage Audit (Env → Tool Readiness)${RESET}"
+    echo ""
+
+    local places maps weather rapid traffic festival
+    places=$(get_env_value "GOOGLE_PLACES_API_KEY")
+    maps=$(get_env_value "GOOGLE_MAPS_API_KEY")
+    weather=$(get_env_value "OPENWEATHERMAP_API_KEY")
+    rapid=$(get_env_value "RAPIDAPI_KEY")
+    traffic=$(get_env_value "TRAFFIC_API_KEY")
+    festival=$(get_env_value "FESTIVAL_API_KEY")
+
+    if is_key_set "$places" || is_key_set "$maps"; then
+        echo -e "  ${CHECK} Location stack: directions / geocode / timezone / AQI / pollen can resolve locations"
+    else
+        echo -e "  ${CROSS} Location stack: missing GOOGLE_PLACES_API_KEY and GOOGLE_MAPS_API_KEY"
+    fi
+
+    if is_key_set "$weather"; then
+        echo -e "  ${CHECK} Weather tool: live OpenWeatherMap enabled"
+    else
+        echo -e "  ${WARN} Weather tool: OPENWEATHERMAP_API_KEY missing (weather tool will fail cleanly)"
+    fi
+
+    if is_key_set "$rapid"; then
+        echo -e "  ${CHECK} Reels/hotels/scrapers: RAPIDAPI_KEY configured"
+    else
+        echo -e "  ${CROSS} Reels/hotels/scrapers: RAPIDAPI_KEY missing"
+    fi
+
+    if is_key_set "$traffic" || is_key_set "$maps"; then
+        echo -e "  ${CHECK} Traffic stimulus: live API path available"
+    else
+        echo -e "  ${WARN} Traffic stimulus: TRAFFIC_API_KEY/GOOGLE_MAPS_API_KEY missing (heuristic fallback only)"
+    fi
+
+    if is_key_set "$festival"; then
+        echo -e "  ${CHECK} Festival stimulus: Calendarific enrichment enabled"
+    else
+        echo -e "  ${WARN} Festival stimulus: FESTIVAL_API_KEY missing (static in-repo calendar only)"
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Server-side Google API checklist (Cloud Console)${RESET}"
+    echo -e "  ${DIM}- Enable APIs: Places API, Geocoding API, Directions API, Distance Matrix API, Air Quality API, Pollen API, Time Zone API${RESET}"
+    echo -e "  ${DIM}- Apply API key restrictions: server IP allowlist + API restrictions (avoid unrestricted keys)${RESET}"
+    echo -e "  ${DIM}- Ensure billing is enabled for the project; most Google Maps Platform endpoints require it${RESET}"
+    echo ""
+    echo -e "  ${BULLET} Optional deep verification: ${BOLD}npx tsx src/test-tools.ts tools${RESET}"
     echo ""
 }
 
@@ -901,9 +1023,10 @@ main_menu() {
         echo -e "    ${CYAN}14${RESET}) 🐳 Docker container status"
         echo -e "  ${DIM}── Database ──${RESET}"
         echo -e "    ${CYAN}15${RESET}) 🗄️  Database schema audit (inspect tables + data)"
+        echo -e "    ${CYAN}16${RESET}) 🧭 Tool coverage audit + server API checklist"
         echo -e "    ${CYAN}0${RESET})  Exit"
         echo ""
-        read -p "  Choose [0-15]: " choice
+        read -p "  Choose [0-16]: " choice
 
         case $choice in
             1) show_dashboard ;;
@@ -921,6 +1044,7 @@ main_menu() {
             13) docker_stop ;;
             14) docker_status ;;
             15) db_audit ;;
+            16) tool_coverage_audit ;;
             0)
                 echo ""
                 echo -e "  ${BOLD}🌍 Happy travels with Aria!${RESET}"

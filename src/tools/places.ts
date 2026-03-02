@@ -78,13 +78,13 @@ export async function searchPlaces(params: PlaceSearchParams): Promise<ToolExecu
         return cached
     }
 
-    const apiKey = process.env.GOOGLE_PLACES_API_KEY
+    const apiKey = process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY
 
     if (!apiKey) {
         return {
             success: false,
             data: null,
-            error: 'Configuration error: Google Places API key is missing.',
+            error: 'Configuration error: Google API key is missing (set GOOGLE_PLACES_API_KEY or GOOGLE_MAPS_API_KEY).',
         }
     }
 
