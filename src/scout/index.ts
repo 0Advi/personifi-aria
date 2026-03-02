@@ -18,7 +18,9 @@
  */
 
 import type { ToolExecutionResult } from '../hooks.js'
+import type { RouteContext, RouteDecision, ToolResult } from '../hooks.js'
 import { bodyHooks } from '../tools/index.js'
+import { buildFallbackMediaDirective } from '../brain/tool-reflection.js'
 import { reflect, type ReflectionResult } from './reflection.js'
 import { buildCacheKey, cacheGet, cacheSet, getTTL, getCacheStats } from './cache.js'
 import { formatPriceINR, iataToCity, toIST, normalizeArea } from './normalizer.js'
@@ -228,6 +230,29 @@ export class Scout {
 // ─── Singleton ────────────────────────────────────────────────────────────────
 
 export const scout = new Scout()
+
+export async function executeScoutPipeline(decision: RouteDecision, context: RouteContext): Promise<ToolResult | null> {
+    if (!decision.useTool || !decision.toolName) {
+        return null
+    }
+
+    const result = await scout.fetch(
+        decision.toolName,
+        decision.toolParams,
+        context.userMessage,
+    )
+
+    return {
+        success: result.reflection.quality !== 'poor',
+        data: result.formatted,
+        raw: result.raw,
+        reflection: {
+            summary: result.reflection.summary,
+            keyFacts: result.reflection.keyFacts,
+        },
+        mediaDirective: buildFallbackMediaDirective(decision.toolName, result.raw),
+    }
+}
 
 // ─── Convenience re-exports ───────────────────────────────────────────────────
 

@@ -2,6 +2,8 @@
 import type { BrainHooks, RouteContext, RouteDecision, ToolResult } from '../hooks.js'
 import { getBodyHooks } from '../hook-registry.js'
 import { reflectToolResult, buildSummaryForPrompt, buildFallbackMediaDirective } from './tool-reflection.js'
+import { getWeatherState } from '../weather/weather-stimulus.js'
+import { getTrafficState } from '../stimulus/traffic-stimulus.js'
 
 export const brainHooks: BrainHooks = {
     async routeMessage(context: RouteContext): Promise<RouteDecision> {
@@ -46,10 +48,18 @@ export const brainHooks: BrainHooks = {
             let mediaDirective: ToolResult['mediaDirective'] | undefined
             if (result.success) {
                 formattedData = JSON.stringify(result.data, null, 2)
+                const weather = getWeatherState('Bengaluru')
+                const traffic = getTrafficState('Bengaluru')
+                const environmentalHint = [
+                    weather ? `weather ${weather.condition} ${weather.temperatureC}C${weather.isRaining ? ' raining' : ''}` : '',
+                    traffic ? `traffic ${traffic.severity}${traffic.durationMinutes > 0 ? ` delay~${traffic.durationMinutes}m` : ''}` : '',
+                ].filter(Boolean).join(' | ')
+
                 const reflected = await reflectToolResult(
                     decision.toolName,
                     context.userMessage,
                     result.data,
+                    environmentalHint,
                 ).catch(() => null)
 
                 if (reflected) {
