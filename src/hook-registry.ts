@@ -10,6 +10,7 @@
 
 import type { BrainHooks, BodyHooks } from './hooks.js'
 import { defaultBrainHooks, defaultBodyHooks } from './hooks.js'
+import { executeScoutPipeline } from './scout/index.js'
 
 // ─── Singleton State ─────────────────────────────────────────────────────────
 
@@ -34,7 +35,10 @@ export function registerBodyHooks(hooks: BodyHooks): void {
 
 /** Handler calls this to get the current brain hooks (or defaults) */
 export function getBrainHooks(): BrainHooks {
-    return brainHooks
+    return {
+        ...brainHooks,
+        executeToolPipeline: (decision, context) => executeScoutPipeline(decision, context),
+    }
 }
 
 /** Handler calls this to get the current body hooks (or defaults) */

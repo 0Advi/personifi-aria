@@ -54,7 +54,11 @@ function buildFallbackDirective(toolName: string, rawData: unknown): ToolMediaDi
     }
 }
 
-function sanitizeReflection(input: ReflectionJSON | null | undefined, fallback: ToolMediaDirective): ToolReflectionResult | null {
+function sanitizeReflection(
+    input: ReflectionJSON | null | undefined,
+    fallback: ToolMediaDirective,
+    toolName: string,
+): ToolReflectionResult | null {
     if (!input) return null
 
     const summary = typeof input.summary === 'string' ? input.summary.trim() : ''
@@ -79,6 +83,10 @@ function sanitizeReflection(input: ReflectionJSON | null | undefined, fallback: 
             : fallback.entityName,
     }
 
+    if (toolName === 'search_places' && fallback.shouldAttach) {
+        mediaDirective.shouldAttach = true
+    }
+
     if (!summary && keyFacts.length === 0) return null
 
     return {
@@ -95,6 +103,7 @@ export async function reflectToolResult(
     toolName: string,
     userMessage: string,
     rawData: unknown,
+    environmentalHint?: string,
 ): Promise<ToolReflectionResult | null> {
     const fallbackDirective = buildFallbackDirective(toolName, rawData)
 
@@ -114,6 +123,7 @@ Convert the tool output into:
 User message: "${userMessage}"
 Tool name: ${toolName}
 Tool output JSON: ${truncated}
+${environmentalHint ? `Current conditions: ${environmentalHint}` : ''}
 
 Respond ONLY valid JSON:
 {
@@ -132,6 +142,8 @@ Rules:
 - Never invent entities not present in tool output.
 - Keep summary factual and concise.
 - media.should_attach should be true only when visual context is genuinely useful.
+- If conditions mention rain/heat/traffic, incorporate that context naturally in summary.
+- For search_places: if output includes usable photo URLs, set media.should_attach to true.
 - prefer_type must be one of photo|video|any.
 - Keep caption under 100 chars.`
 
@@ -153,7 +165,7 @@ Rules:
 
         const text = completion.choices[0]?.message?.content ?? '{}'
         const parsed = JSON.parse(text) as ReflectionJSON
-        const reflected = sanitizeReflection(parsed, fallbackDirective)
+        const reflected = sanitizeReflection(parsed, fallbackDirective, toolName)
         if (!reflected) return null
         return reflected
     } catch (err) {
