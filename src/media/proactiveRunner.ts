@@ -122,6 +122,8 @@ function pickContentType(): ContentPickType {
 const userStates = new Map<string, UserProactiveState>()
 const weatherStimulusSentAt = new Map<string, { stimulus: WeatherStimulusKind; ts: number }>()
 const WEATHER_STIMULUS_COOLDOWN_MS = 90 * 60 * 1000
+const INTERNAL_USER_ID_TTL_MS = 30 * 60 * 1000
+const internalUserIdCache = new Map<string, { userId: string; expiresAt: number }>()
 
 /**
  * Load proactive state for a user from DB.
@@ -564,6 +566,11 @@ async function resolveUserPreferenceSummary(channelUserId: string, limit = 5): P
 }
 
 async function resolveInternalUserId(channelUserId: string): Promise<string | null> {
+    const cached = internalUserIdCache.get(channelUserId)
+    if (cached && cached.expiresAt > Date.now()) {
+        return cached.userId
+    }
+
     try {
         const { rows } = await getPool().query<{ user_id: string }>(
             `SELECT user_id
@@ -573,8 +580,18 @@ async function resolveInternalUserId(channelUserId: string): Promise<string | nu
              LIMIT 1`,
             [channelUserId],
         )
-        return rows[0]?.user_id ?? null
+        const resolved = rows[0]?.user_id ?? null
+        if (resolved) {
+            internalUserIdCache.set(channelUserId, {
+                userId: resolved,
+                expiresAt: Date.now() + INTERNAL_USER_ID_TTL_MS,
+            })
+        } else {
+            internalUserIdCache.delete(channelUserId)
+        }
+        return resolved
     } catch {
+        internalUserIdCache.delete(channelUserId)
         return null
     }
 }

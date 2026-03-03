@@ -291,6 +291,33 @@ function extractLocationCandidate(message: string): string | null {
   return null
 }
 
+/**
+ * Count question-like sentences with a light heuristic.
+ * We combine punctuation and interrogative starters to avoid brittle '?' only checks.
+ */
+function countQuestionLikeSentences(text: string): number {
+  const sentences = text
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map(s => s.trim())
+    .filter(Boolean)
+
+  let count = 0
+  for (const sentence of sentences) {
+    if (sentence.includes('?')) {
+      count++
+      continue
+    }
+
+    const normalized = sentence.replace(/^[^a-zA-Z]+/, '').toLowerCase()
+    if (!normalized) continue
+    if (/^(what|which|where|when|why|how|who|whom|whose|can|could|would|should|do|does|did|is|are|am|will|have|has)\b/.test(normalized)) {
+      count++
+    }
+  }
+
+  return count
+}
+
 async function buildSearchPlacesContextHint(
   brainHooks: ReturnType<typeof getBrainHooks>,
   location: string | null,
@@ -512,9 +539,6 @@ export async function handleMessage(
     // ─── Step 1: Input sanitization ───────────────────────────────
     const sanitizeResult = sanitizeInput(rawMessage)
     const userMessage = sanitizeResult.sanitized
-    const modelUserMessage = userMessage.startsWith('[onboarding_callback]')
-      ? 'User selected an onboarding option via inline button.'
-      : userMessage
 
     if (sanitizeResult.suspiciousPatterns.length > 0) {
       logSuspiciousInput(channelUserId, channel, rawMessage, sanitizeResult)
@@ -544,6 +568,11 @@ export async function handleMessage(
     }
     const onboardingActive = !!onboardingResult?.handled
     const lightweightOnboarding = options.lightweightOnboarding === true || onboardingActive
+    const modelUserMessage = onboardingActive
+      ? (userMessage.startsWith('[onboarding_callback]')
+        ? 'User selected an onboarding option via inline button.'
+        : 'User shared onboarding details for the current onboarding step.')
+      : userMessage
 
     // ─── Step 3: Check rate limit ─────────────────────────────────
     // Callback-driven onboarding taps should never get blocked mid-flow.
@@ -1130,9 +1159,15 @@ export async function handleMessage(
 
     if (onboardingActive && onboardingResult?.reply) {
       const generated = assistantResponse.trim()
-      const questionCount = (generated.match(/\?/g) ?? []).length
-      const severeStepDrift = generated.length > 360 || questionCount > 1
+      const questionLikeCount = countQuestionLikeSentences(generated)
+      const severeStepDrift = generated.length > 560 || questionLikeCount > 1
       if (severeStepDrift) {
+        console.warn('[handler] Onboarding drift fallback applied', {
+          userId: user.userId,
+          generatedLength: generated.length,
+          questionLikeCount,
+          preview: generated.slice(0, 140),
+        })
         assistantResponse = onboardingResult.reply
       }
     }
@@ -1155,6 +1190,8 @@ export async function handleMessage(
     }
 
     // Ensure post-onboarding conversation starts from a clean context window.
+    // Intentional: onboarding turns are structured/system-guided and should not
+    // bias the first real conversational turn after onboarding completes.
     if (onboardingActive && onboardingResult?.onboardingCompleted) {
       await clearSessionMessages(session.sessionId).catch(err => {
         console.warn('[handler] Failed to clear onboarding session history:', safeError(err))

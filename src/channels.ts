@@ -26,23 +26,35 @@ export interface ChannelAdapter {
   sendMedia?: (chatId: string, media: MediaItem[]) => Promise<void>
 }
 
+function isLikelyPlacesPhotoUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.toLowerCase()
+    const path = parsed.pathname.toLowerCase()
+
+    if (host.includes('places.googleapis.com')) return true
+    if ((host.endsWith('googleusercontent.com') || host.endsWith('ggpht.com')) && path.includes('/p/')) {
+      return true
+    }
+    return false
+  } catch {
+    return false
+  }
+}
+
 function inferDownloadSource(url: string): 'instagram' | 'tiktok' | 'youtube' | 'places' | 'unknown' {
   const normalized = url.toLowerCase()
   if (normalized.includes('tiktok')) return 'tiktok'
   if (normalized.includes('youtube') || normalized.includes('youtu.be')) return 'youtube'
   if (normalized.includes('instagram') || normalized.includes('cdninstagram') || normalized.includes('fbcdn')) return 'instagram'
-  if (
-    normalized.includes('places.googleapis.com')
-    || normalized.includes('googleusercontent.com')
-    || normalized.includes('gstatic.com')
-  ) {
+  if (isLikelyPlacesPhotoUrl(url)) {
     return 'places'
   }
   return 'unknown'
 }
 
 function isPlacesPhotoUrl(url: string): boolean {
-  return inferDownloadSource(url) === 'places'
+  return isLikelyPlacesPhotoUrl(url)
 }
 
 // ============================================
@@ -190,6 +202,7 @@ export const telegramAdapter: ChannelAdapter = {
     } else {
       // Multiple photos — try downloading each and uploading individually; fall back to URL-based sendMediaGroup
       let sentCount = 0
+      const mediaGroupFallback: MediaItem[] = []
       for (const item of media.slice(0, 10)) {
         const source = inferDownloadSource(item.url)
         const downloaded = source === 'unknown'
@@ -202,6 +215,7 @@ export const telegramAdapter: ChannelAdapter = {
         if (isPlacesPhotoUrl(item.url)) {
           if (item.caption) {
             await telegramAdapter.sendMessage(chatId, item.caption)
+            sentCount++
           }
           continue
         }
@@ -217,11 +231,13 @@ export const telegramAdapter: ChannelAdapter = {
           }),
         }).catch(() => null)
         if (resp?.ok) sentCount++
+        else mediaGroupFallback.push(item)
       }
 
-      if (sentCount === 0) {
-        // All individual attempts failed — try sendMediaGroup URL-based as last resort
-        const mediaGroup = media.slice(0, 10).map((item, i) => ({
+      if (sentCount === 0 && mediaGroupFallback.length > 0) {
+        // All individual attempts failed — try sendMediaGroup URL-based as last resort.
+        // Excludes Places URLs to avoid static map thumbnail regressions.
+        const mediaGroup = mediaGroupFallback.map((item, i) => ({
           type: 'photo' as const,
           media: item.url,
           ...(i === 0 && item.caption ? { caption: item.caption, parse_mode: 'HTML' as const } : {}),
