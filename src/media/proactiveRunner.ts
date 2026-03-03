@@ -376,7 +376,9 @@ async function trySendWeatherStimulus(
     state: UserProactiveState,
     location: string,
 ): Promise<boolean> {
-    await refreshWeatherState(location).catch(() => null)
+    if (typeof refreshWeatherState === 'function') {
+        await refreshWeatherState(location).catch(() => null)
+    }
     const weather = getWeatherState(location)
     if (!weather?.stimulus) return false
 
@@ -440,7 +442,9 @@ async function trySendTrafficStimulus(
     state: UserProactiveState,
     location: string,
 ): Promise<boolean> {
-    await refreshTrafficState(location).catch(() => null)
+    if (typeof refreshTrafficState === 'function') {
+        await refreshTrafficState(location).catch(() => null)
+    }
     const traffic = getTrafficState(location)
     if (!traffic?.stimulus || traffic.stimulus === 'CLEAR_TRAFFIC') return false
 
@@ -486,7 +490,9 @@ async function trySendFestivalStimulus(
     state: UserProactiveState,
     location: string,
 ): Promise<boolean> {
-    await refreshFestivalState(location).catch(() => null)
+    if (typeof refreshFestivalState === 'function') {
+        await refreshFestivalState(location).catch(() => null)
+    }
     const festival = getFestivalState(location)
     if (!festival?.active || !festival.festival) return false
 
