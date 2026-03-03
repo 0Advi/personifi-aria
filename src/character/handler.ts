@@ -29,6 +29,7 @@ import {
   updateUserProfile,
   appendMessages,
   trimSessionHistory,
+  clearSessionMessages,
   checkRateLimit,
   trackUsage,
   type Message,
@@ -511,6 +512,9 @@ export async function handleMessage(
     // ─── Step 1: Input sanitization ───────────────────────────────
     const sanitizeResult = sanitizeInput(rawMessage)
     const userMessage = sanitizeResult.sanitized
+    const modelUserMessage = userMessage.startsWith('[onboarding_callback]')
+      ? 'User selected an onboarding option via inline button.'
+      : userMessage
 
     if (sanitizeResult.suspiciousPatterns.length > 0) {
       logSuspiciousInput(channelUserId, channel, rawMessage, sanitizeResult)
@@ -542,7 +546,9 @@ export async function handleMessage(
     const lightweightOnboarding = options.lightweightOnboarding === true || onboardingActive
 
     // ─── Step 3: Check rate limit ─────────────────────────────────
-    const withinLimit = await checkRateLimit(user.userId)
+    // Callback-driven onboarding taps should never get blocked mid-flow.
+    const bypassRateLimit = options.lightweightOnboarding === true
+    const withinLimit = bypassRateLimit ? true : await checkRateLimit(user.userId)
     if (!withinLimit) {
       return { text: "Whoa, we're chatting so fast! Give me a sec to catch my breath 😅 What were you asking about?" }
     }
@@ -933,9 +939,19 @@ export async function handleMessage(
       const stepContext = onboardingResult?.stepCompleted
         ? `Completed step: ${onboardingResult.stepCompleted}.`
         : ''
+      const canonicalPrompt = onboardingResult?.reply
+        ? `Canonical step prompt: """${onboardingResult.reply}""".`
+        : ''
+      const locationUiContext = onboardingResult?.requestLocation
+        ? 'A location-share UI is attached; explicitly ask for area/location.'
+        : ''
+      const buttonUiContext = onboardingResult?.buttons?.flat().map(b => b.text).join(' | ')
+      const buttonHint = buttonUiContext
+        ? `Inline buttons are attached (${buttonUiContext}). Keep text aligned to these choices and do not ask unrelated questions.`
+        : ''
       const onboardingHint =
-        `\n\n[ARIA HINT: Onboarding is active. ${stepContext} ${onboardingContext} ` +
-        `Respond in your normal voice, keep it natural, and move exactly one onboarding step forward.]`
+        `\n\n[ARIA HINT: Onboarding is active. ${stepContext} ${onboardingContext} ${canonicalPrompt} ${locationUiContext} ${buttonHint} ` +
+        `Respond in your normal voice, keep it natural, ask exactly one onboarding question, and do not jump to other steps.]`
       toolResultStr = toolResultStr ? `${toolResultStr}${onboardingHint}` : onboardingHint
     }
 
@@ -943,7 +959,7 @@ export async function handleMessage(
     let systemPromptComposed: string
     try {
       systemPromptComposed = composeSystemPrompt({
-        userMessage,
+        userMessage: modelUserMessage,
         isAuthenticated: !!(user.displayName && user.homeLocation),
         displayName: user.displayName,
         homeLocation: user.homeLocation,
@@ -990,7 +1006,7 @@ export async function handleMessage(
     let messages = buildMessages(
       systemPromptComposed,
       session.messages,
-      userMessage,
+      modelUserMessage,
       historyLimit,
     )
 
@@ -1011,7 +1027,7 @@ export async function handleMessage(
         toolResultStr = toolResultStr.substring(0, 800) + '\n…[truncated for brevity]'
         try {
           systemPromptComposed = composeSystemPrompt({
-            userMessage, isAuthenticated: !!(user.displayName && user.homeLocation),
+            userMessage: modelUserMessage, isAuthenticated: !!(user.displayName && user.homeLocation),
             displayName: user.displayName, homeLocation: user.homeLocation,
             memories, graphContext, cognitiveState, preferences, activeGoal, agendaStack,
             isFirstMessage, isSimpleMessage: isSimple, toolResults: toolResultStr,
@@ -1020,14 +1036,14 @@ export async function handleMessage(
             activeTopics, topicStrategy,
           })
         } catch { /* keep existing composed prompt */ }
-        messages = buildMessages(systemPromptComposed, session.messages, userMessage, historyLimit)
+        messages = buildMessages(systemPromptComposed, session.messages, modelUserMessage, historyLimit)
         estimatedTokens = estimateTokens(messages)
       }
 
       // Strategy 2: Reduce history window
       if (estimatedTokens > MAX_PROMPT_TOKENS) {
         historyLimit = Math.max(2, Math.floor(historyLimit / 2))
-        messages = buildMessages(systemPromptComposed, session.messages, userMessage, historyLimit)
+        messages = buildMessages(systemPromptComposed, session.messages, modelUserMessage, historyLimit)
         estimatedTokens = estimateTokens(messages)
       }
 
@@ -1110,7 +1126,16 @@ export async function handleMessage(
 
     // ─── Step 13: Filter output ───────────────────────────────────
     const filterResult = filterOutput(rawResponse)
-    const assistantResponse = filterResult.filtered
+    let assistantResponse = filterResult.filtered
+
+    if (onboardingActive && onboardingResult?.reply) {
+      const generated = assistantResponse.trim()
+      const questionCount = (generated.match(/\?/g) ?? []).length
+      const severeStepDrift = generated.length > 360 || questionCount > 1
+      if (severeStepDrift) {
+        assistantResponse = onboardingResult.reply
+      }
+    }
 
     if (needsHumanReview(filterResult)) {
       console.error('[SECURITY] Output filtered for review:', {
@@ -1121,10 +1146,20 @@ export async function handleMessage(
     }
 
     // ─── Step 14: Store messages in session ────────────────────────
-    await appendMessages(session.sessionId, userMessage, assistantResponse)
+    // Onboarding turns are structured wizard steps; avoid polluting normal chat history.
+    const shouldPersistSessionMessages = !onboardingActive
+    if (shouldPersistSessionMessages) {
+      await appendMessages(session.sessionId, userMessage, assistantResponse)
+      // ─── Step 15: Trim history if needed ──────────────────────────
+      await trimSessionHistory(session.sessionId)
+    }
 
-    // ─── Step 15: Trim history if needed ──────────────────────────
-    await trimSessionHistory(session.sessionId)
+    // Ensure post-onboarding conversation starts from a clean context window.
+    if (onboardingActive && onboardingResult?.onboardingCompleted) {
+      await clearSessionMessages(session.sessionId).catch(err => {
+        console.warn('[handler] Failed to clear onboarding session history:', safeError(err))
+      })
+    }
 
     // ─── Step 16: Track usage (estimated) ──────────────────────────
     // Tier manager abstracts the completion object; use estimates
@@ -1139,7 +1174,9 @@ export async function handleMessage(
     )
 
     // ─── Step 17: Extract auth info (existing) ────────────────────
-    await extractAndSaveUserInfo(user.userId, userMessage, user)
+    if (!onboardingActive) {
+      await extractAndSaveUserInfo(user.userId, userMessage, user)
+    }
 
     // ─── Step 17b: Pulse engagement scoring (always fire-and-forget) ─
     const previousUserMessage = [...session.messages]
@@ -1149,54 +1186,56 @@ export async function handleMessage(
       .reverse()
       .find(msg => !!msg.timestamp)?.timestamp ?? null
 
-    setImmediate(() => {
-      // Topic intent processing — fire-and-forget, NEVER block the response
-      if (!isSimple) {
-        topicIntentService.processMessage(
-          user.userId,
-          session.sessionId,
-          userMessage,
-          classification,
-        ).catch(err => {
-          console.error('[handler] Topic intent processing failed:', err)
-        })
-      }
-
-      // ─── Execution Bridge: Completion Hook ─────────────────────────
-      // When a tool fired for an executing-phase topic, mark it as completed.
-      if (routeDecision.useTool && toolResultStr && executingTopic) {
-        topicIntentService.completeTopic(user.userId, executingTopic.id)
-          .then(() => logTopicCompleted(user.userId, executingTopic!.id, executingTopic!.topic))
-          .catch(err => {
-            console.error('[handler] Topic completion failed:', err)
+    if (!lightweightOnboarding) {
+      setImmediate(() => {
+        // Topic intent processing — fire-and-forget, NEVER block the response
+        if (!isSimple) {
+          topicIntentService.processMessage(
+            user.userId,
+            session.sessionId,
+            userMessage,
+            classification,
+          ).catch(err => {
+            console.error('[handler] Topic intent processing failed:', err)
           })
-      }
+        }
 
-      pulseService.recordEngagement({
-        userId: user.userId,
-        message: userMessage,
-        previousUserMessage,
-        previousMessageAt,
-        classifierSignal: classification.userSignal,
-      }).catch(err => {
-        console.error('[handler] Pulse scoring failed:', safeError(err))
-      })
+        // ─── Execution Bridge: Completion Hook ─────────────────────────
+        // When a tool fired for an executing-phase topic, mark it as completed.
+        if (routeDecision.useTool && toolResultStr && executingTopic) {
+          topicIntentService.completeTopic(user.userId, executingTopic.id)
+            .then(() => logTopicCompleted(user.userId, executingTopic!.id, executingTopic!.topic))
+            .catch(err => {
+              console.error('[handler] Topic completion failed:', err)
+            })
+        }
 
-      agendaPlanner.evaluate({
-        userId: user.userId,
-        sessionId: session.sessionId,
-        message: userMessage,
-        displayName: user.displayName,
-        homeLocation: user.homeLocation,
-        pulseState: pulseEngagementState,
-        classifierGoal: cognitiveState.conversationGoal,
-        messageComplexity: classification.message_complexity,
-        activeToolName: routeDecision?.toolName ?? undefined,
-        hasToolResult: !!toolResultStr,
-      }).catch(err => {
-        console.error('[handler] Agenda planner evaluation failed:', safeError(err))
+        pulseService.recordEngagement({
+          userId: user.userId,
+          message: userMessage,
+          previousUserMessage,
+          previousMessageAt,
+          classifierSignal: classification.userSignal,
+        }).catch(err => {
+          console.error('[handler] Pulse scoring failed:', safeError(err))
+        })
+
+        agendaPlanner.evaluate({
+          userId: user.userId,
+          sessionId: session.sessionId,
+          message: userMessage,
+          displayName: user.displayName,
+          homeLocation: user.homeLocation,
+          pulseState: pulseEngagementState,
+          classifierGoal: cognitiveState.conversationGoal,
+          messageComplexity: classification.message_complexity,
+          activeToolName: routeDecision?.toolName ?? undefined,
+          hasToolResult: !!toolResultStr,
+        }).catch(err => {
+          console.error('[handler] Agenda planner evaluation failed:', safeError(err))
+        })
       })
-    })
+    }
 
     // ─── Steps 18-21: Durable memory writes via Archivist queue ───────
     // Replaced fire-and-forget setImmediate() with enqueueMemoryWrite().

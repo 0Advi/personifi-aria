@@ -11,6 +11,8 @@ interface PlaceSearchParams {
 
 const PLACES_CACHE_TTL = 30 * 60 * 1000 // 30 minutes
 const PHOTO_URI_CACHE_TTL = 30 * 60 * 1000 // 30 minutes
+const PHOTO_URI_CACHE_MAX_SIZE = 2000
+const PHOTO_URI_CACHE_SWEEP_INTERVAL = 100
 
 type PlaceImage = { url: string; caption: string }
 type PlacesPayload = {
@@ -65,8 +67,30 @@ function buildPhotoMetadataUrl(photoName: string, apiKey: string, maxHeightPx = 
 }
 
 const photoUriCache = new Map<string, { uri: string; expiresAt: number }>()
+let photoUriCacheOps = 0
+
+function sweepPhotoUriCache(force = false): void {
+    photoUriCacheOps++
+    if (!force && photoUriCacheOps % PHOTO_URI_CACHE_SWEEP_INTERVAL !== 0 && photoUriCache.size <= PHOTO_URI_CACHE_MAX_SIZE) {
+        return
+    }
+
+    const now = Date.now()
+    for (const [name, entry] of photoUriCache.entries()) {
+        if (entry.expiresAt <= now) {
+            photoUriCache.delete(name)
+        }
+    }
+
+    while (photoUriCache.size > PHOTO_URI_CACHE_MAX_SIZE) {
+        const oldestKey = photoUriCache.keys().next().value as string | undefined
+        if (!oldestKey) break
+        photoUriCache.delete(oldestKey)
+    }
+}
 
 function getCachedPhotoUri(photoName: string): string | null {
+    sweepPhotoUriCache()
     const cached = photoUriCache.get(photoName)
     if (!cached) return null
     if (cached.expiresAt <= Date.now()) {
@@ -92,6 +116,7 @@ async function resolvePhotoUri(photoName: string, apiKey: string): Promise<strin
                 uri: payload.photoUri,
                 expiresAt: Date.now() + PHOTO_URI_CACHE_TTL,
             })
+            sweepPhotoUriCache()
             return payload.photoUri
         }
         return null
@@ -169,15 +194,23 @@ export async function searchPlaces(params: PlaceSearchParams): Promise<ToolExecu
                 return cached
             }
 
-            const images = await hydratePlaceImages(payload.raw, apiKey)
-            return {
+            const hydratedImages = await hydratePlaceImages(payload.raw, apiKey)
+            const fallbackImages = hydratedImages.length > 0
+                ? hydratedImages
+                : (Array.isArray(payload.images) ? payload.images : [])
+
+            const refreshedResult: ToolExecutionResult = {
                 ...cached,
                 data: {
                     ...payload,
-                    images,
-                    imagesResolvedAt: Date.now(),
+                    images: fallbackImages,
+                    imagesResolvedAt: hydratedImages.length > 0
+                        ? Date.now()
+                        : (payload.imagesResolvedAt ?? Date.now()),
                 },
             }
+            cacheSet(key, refreshedResult, PLACES_CACHE_TTL)
+            return refreshedResult
         }
         return cached
     }

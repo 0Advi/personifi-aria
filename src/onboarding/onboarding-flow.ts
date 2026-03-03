@@ -28,6 +28,8 @@ export interface OnboardingResult {
     onboardingContext?: string
     /** Optional marker for the step that just completed. */
     stepCompleted?: string
+    /** True when onboarding has just completed on this turn. */
+    onboardingCompleted?: boolean
     /** When true, channel layer should show Telegram location-share keyboard */
     requestLocation?: boolean
     /** Optional Telegram inline keyboard buttons */
@@ -43,6 +45,7 @@ interface HandledOnboardingPayload {
     reply: string
     onboardingContext: string
     stepCompleted?: string
+    onboardingCompleted?: boolean
     requestLocation?: boolean
     buttons?: Array<Array<{ text: string; callback_data: string }>>
 }
@@ -53,6 +56,7 @@ function handledOnboarding(payload: HandledOnboardingPayload): OnboardingResult 
         reply: payload.reply,
         onboardingContext: payload.onboardingContext,
         ...(payload.stepCompleted ? { stepCompleted: payload.stepCompleted } : {}),
+        ...(payload.onboardingCompleted ? { onboardingCompleted: true } : {}),
         ...(payload.requestLocation ? { requestLocation: true } : {}),
         ...(payload.buttons ? { buttons: payload.buttons } : {}),
     }
@@ -100,7 +104,7 @@ function looksLikeLocationInput(message: string): boolean {
 
 function normalizeOnboardingMessage(message: string): string {
     const trimmed = message.trim()
-    if (trimmed === '/start') return ''
+    if (/^\/start(?:@\w+)?(?:\s+.*)?$/i.test(trimmed)) return ''
     return trimmed
 }
 
@@ -452,6 +456,7 @@ export async function handleOnboarding(
                 return handledOnboarding({
                     reply: STEP_MESSAGES.done.replace('{name}', name),
                     stepCompleted: 'friends',
+                    onboardingCompleted: true,
                     onboardingContext: 'Onboarding completed. Congratulate the user and smoothly transition into normal conversation.',
                 })
             }
@@ -470,6 +475,7 @@ export async function handleOnboarding(
             return handledOnboarding({
                 reply: `${STEP_MESSAGES.done.replace('{name}', name)}\n\n_You can add friends anytime with /friend add @username_`,
                 stepCompleted: 'friends',
+                onboardingCompleted: true,
                 onboardingContext: 'Onboarding completed with friend-step skip. Transition naturally and mention they can add friends later.',
             })
         }
@@ -505,6 +511,7 @@ export async function handleOnboarding(
                     return handledOnboarding({
                         reply: STEP_MESSAGES.done.replace('{name}', name),
                         stepCompleted: 'friends',
+                        onboardingCompleted: true,
                         onboardingContext: 'Onboarding completed after friend resolution. Transition naturally into regular conversation.',
                     })
                 }

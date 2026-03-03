@@ -563,6 +563,22 @@ async function resolveUserPreferenceSummary(channelUserId: string, limit = 5): P
     }
 }
 
+async function resolveInternalUserId(channelUserId: string): Promise<string | null> {
+    try {
+        const { rows } = await getPool().query<{ user_id: string }>(
+            `SELECT user_id
+             FROM users
+             WHERE channel_user_id = $1
+             ORDER BY CASE WHEN channel = 'telegram' THEN 0 ELSE 1 END, updated_at DESC
+             LIMIT 1`,
+            [channelUserId],
+        )
+        return rows[0]?.user_id ?? null
+    } catch {
+        return null
+    }
+}
+
 async function runProactiveForUser(userId: string, chatId: string): Promise<void> {
     const state = await getOrCreateState(userId, chatId)
     const homeLocation = await resolveUserHomeLocation(userId)
@@ -843,14 +859,13 @@ async function updateStateAfterSend(
 
     saveStateToDB(state)
 
+    const internalUserId = await resolveInternalUserId(userId)
+    if (!internalUserId) return
+
     getPool().query(
         `INSERT INTO proactive_messages (user_id, message_type, sent_at, category, hashtag)
-         SELECT u.user_id, 'proactive_content', NOW(), $2, $3
-         FROM users u
-         WHERE u.channel_user_id = $1
-         ORDER BY CASE WHEN u.channel = 'telegram' THEN 0 ELSE 1 END, u.updated_at DESC
-         LIMIT 1`,
-        [userId, category, hashtag]
+         VALUES ($1, 'proactive_content', NOW(), $2, $3)`,
+        [internalUserId, category, hashtag]
     ).catch(() => { })
 }
 
