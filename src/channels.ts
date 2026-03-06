@@ -31,8 +31,33 @@ export interface ChannelAdapter {
 
 /** Detect if a URL is a resolved Google Places photo (lh3 CDN or places API) */
 function isLikelyPlacesPhotoUrl(url: string): boolean {
-  return /lh3\.googleusercontent\.com/i.test(url)
-    || /places\.googleapis\.com\/v1\/.+\/media/i.test(url)
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.toLowerCase()
+    const path = parsed.pathname.toLowerCase()
+
+    if (host.includes('places.googleapis.com') && path.includes('/media')) {
+      return true
+    }
+
+    if (
+      host.endsWith('googleusercontent.com')
+      || host.endsWith('ggpht.com')
+    ) {
+      // Places photo URLs commonly use one of these path patterns.
+      if (
+        path.includes('/place-photos/')
+        || path.includes('/gpms-cs-s/')
+        || path.includes('/p/')
+      ) {
+        return true
+      }
+    }
+
+    return false
+  } catch {
+    return false
+  }
 }
 
 /**
