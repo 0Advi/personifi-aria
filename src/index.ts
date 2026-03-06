@@ -397,8 +397,9 @@ server.post('/webhook/telegram', async (request, reply) => {
       }
     }
 
-    // Drop map venue pins for places / directions results
-    if (response.venues?.length) {
+    // Drop map venue pins ONLY when no photos are being sent.
+    // When real photos exist (from Google Places), venue pins just add visual clutter.
+    if (response.venues?.length && !(response.media?.length)) {
       for (const venue of response.venues.slice(0, 3)) {
         await sendVenue(chatId, venue)
       }

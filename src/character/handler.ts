@@ -1341,13 +1341,22 @@ export async function handleMessage(
       )
       : undefined
 
+    const toolExtractedMedia = extractMediaFromToolResult(routeDecision.toolName, toolRawData)
+    const resolvedMedia = inlineMediaItem
+      ? [inlineMediaItem]
+      : (toolExtractedMedia ?? fallbackMediaFromContext ?? venuePreviewMedia)
+
+    // Diagnostic logging for media pipeline
+    console.log(`[handler] Media pipeline: toolName=${routeDecision.toolName} | inlineMediaItem=${!!inlineMediaItem} | toolExtracted=${toolExtractedMedia?.length ?? 0} | fallbackFromCtx=${fallbackMediaFromContext?.length ?? 0} | venuePreview=${venuePreviewMedia?.length ?? 0} | final=${resolvedMedia?.length ?? 0}`)
+    if (resolvedMedia?.length) {
+      console.log(`[handler] Media URLs: ${resolvedMedia.map(m => m.url?.substring(0, 80)).join(' | ')}`)
+    }
+
     return {
       text: assistantResponse,
       // Inline media (reel/image from influence strategy) takes precedence over
       // tool-extracted product photos. Falls back gracefully when neither is available.
-      media: inlineMediaItem
-        ? [inlineMediaItem]
-        : (extractMediaFromToolResult(routeDecision.toolName, toolRawData) ?? fallbackMediaFromContext ?? venuePreviewMedia),
+      media: resolvedMedia,
       venues,
       ...(onboardingActive && onboardingResult?.requestLocation ? { requestLocation: true } : {}),
       ...(onboardingActive && onboardingResult?.buttons ? { _buttons: onboardingResult.buttons } : {}),
