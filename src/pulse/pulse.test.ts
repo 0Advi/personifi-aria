@@ -5,6 +5,12 @@ vi.mock('../character/session-store.js', () => ({
   getPool: vi.fn(() => ({ query: mockQuery })),
 }))
 
+// Mock engagement-metrics so fire-and-forget syncEngagementState doesn't interfere
+// with DB call counts in PulseService tests
+vi.mock('./engagement-metrics.js', () => ({
+  syncEngagementState: vi.fn().mockResolvedValue(undefined),
+}))
+
 import { extractEngagementSignals } from './signal-extractor.js'
 import { applyDecay, clampScore, transitionState } from './state-machine.js'
 import { PulseService } from './pulse-service.js'
