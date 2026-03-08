@@ -999,6 +999,14 @@ test_everything() {
     npx tsx src/test-tools.ts all
 }
 
+test_aws_features() {
+    echo ""
+    echo -e "  ${BOLD}☁️  Testing AWS Integrations (Bedrock + DynamoDB)${RESET}"
+    echo -e "  ${DIM}Running explicit end-to-end extraction and database syncing checks...${RESET}"
+    echo ""
+    npx tsx src/test-aws-features.ts
+}
+
 db_audit() {
     echo ""
     echo -e "  ${BOLD}🗄️  Database Schema Audit${RESET}"
@@ -1027,16 +1035,17 @@ main_menu() {
         echo -e "    ${CYAN}9${RESET})  🔧 Test all tools (20 tools, live API calls)"
         echo -e "    ${CYAN}10${RESET}) 🤖 Test all subagents (module health check)"
         echo -e "    ${CYAN}11${RESET}) 🧪 Full system test (tools + subagents)"
+        echo -e "    ${CYAN}12${RESET}) ☁️  Test AWS Integration (Bedrock + DynamoDB)"
         echo -e "  ${DIM}── Docker ──${RESET}"
-        echo -e "    ${CYAN}12${RESET}) 🐳 Start Docker containers"
-        echo -e "    ${CYAN}13${RESET}) 🐳 Stop Docker containers"
-        echo -e "    ${CYAN}14${RESET}) 🐳 Docker container status"
+        echo -e "    ${CYAN}13${RESET}) 🐳 Start Docker containers"
+        echo -e "    ${CYAN}14${RESET}) 🐳 Stop Docker containers"
+        echo -e "    ${CYAN}15${RESET}) 🐳 Docker container status"
         echo -e "  ${DIM}── Database ──${RESET}"
-        echo -e "    ${CYAN}15${RESET}) 🗄️  Database schema audit (inspect tables + data)"
-        echo -e "    ${CYAN}16${RESET}) 🧭 Tool coverage audit + server API checklist"
+        echo -e "    ${CYAN}16${RESET}) 🗄️  Database schema audit (inspect tables + data)"
+        echo -e "    ${CYAN}17${RESET}) 🧭 Tool coverage audit + server API checklist"
         echo -e "    ${CYAN}0${RESET})  Exit"
         echo ""
-        read -p "  Choose [0-16]: " choice
+        read -p "  Choose [0-17]: " choice
 
         case $choice in
             1) show_dashboard ;;
@@ -1050,11 +1059,12 @@ main_menu() {
             9) test_all_tools ;;
             10) test_all_agents ;;
             11) test_everything ;;
-            12) docker_start ;;
-            13) docker_stop ;;
-            14) docker_status ;;
-            15) db_audit ;;
-            16) tool_coverage_audit ;;
+            12) test_aws_features ;;
+            13) docker_start ;;
+            14) docker_stop ;;
+            15) docker_status ;;
+            16) db_audit ;;
+            17) tool_coverage_audit ;;
             0)
                 echo ""
                 echo -e "  ${BOLD}🌍 Happy travels with Aria!${RESET}"
