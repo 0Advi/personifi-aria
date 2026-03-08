@@ -19,7 +19,7 @@ The dual-model pipeline is optimized for **sub-second total response time** for 
 
 ```mermaid
 gantt
-    title Pipeline Latency — Conversational Message
+    title Pipeline Latency - Conversational Message
     dateFormat X
     axisFormat %L ms
 

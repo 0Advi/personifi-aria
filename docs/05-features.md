@@ -27,23 +27,23 @@
 
 ```mermaid
 graph TB
-    subgraph Social Layer
-        FG[Friend Graph<br/>Directional Relationships<br/>Add / Accept / Block]
-        SQ[Squad System<br/>Named Groups<br/>Create / Invite / Leave]
-        OW[Outbound Worker<br/>Scheduled every 15 min]
+    subgraph SLY["Social Layer"]
+        FG["Friend Graph\nDirectional Relationships\nAdd / Accept / Block"]
+        SQ["Squad System\nNamed Groups\nCreate / Invite / Leave"]
+        OW["Outbound Worker\nScheduled every 15 min"]
     end
 
-    subgraph Social Intelligence
-        CI[Correlated Intent Detection<br/>Multiple squad members<br/>mentioning same topic]
-        FB[Friend Bridge<br/>Active user → Passive friend<br/>Re-engagement via ping]
-        OG[Opinion Gathering<br/>Ask friend with high affinity<br/>for current category]
-        AC[Action Cards<br/>Inline keyboard with<br/>Accept / Dismiss / More]
+    subgraph SI["Social Intelligence"]
+        CI["Correlated Intent Detection\nMultiple squad members\nmentioning same topic"]
+        FB["Friend Bridge\nActive user to Passive friend\nRe-engagement via ping"]
+        OG["Opinion Gathering\nAsk friend with high affinity\nfor current category"]
+        AC["Action Cards\nInline keyboard with\nAccept / Dismiss / More"]
     end
 
-    subgraph Engagement Integration
-        PE[Pulse Engine<br/>Engagement State]
-        CW[CloudWatch<br/>Cascade Metrics]
-        SNS[SNS<br/>Squad Notifications]
+    subgraph EI["Engagement Integration"]
+        PE["Pulse Engine\nEngagement State"]
+        CW["CloudWatch\nCascade Metrics"]
+        SNS["SNS\nSquad Notifications"]
     end
 
     FG --> CI
@@ -71,9 +71,9 @@ flowchart LR
     A[Tool Request] --> B{Redis Cache?}
     B -->|Hit| C[Return Cached]
     B -->|Miss| D[Execute Tool API]
-    D --> E[Normalize Output<br/>Prices, IATA codes, IST times]
-    E --> F[8B Reflection Pass<br/>Verify quality, extract key facts]
-    F --> G[Cache Result<br/>Per-tool TTL]
+    D --> E["Normalize Output\nPrices, IATA codes, IST times"]
+    E --> F["8B Reflection Pass\nVerify quality, extract key facts"]
+    F --> G["Cache Result\nPer-tool TTL"]
     G --> H[Inject into 70B Prompt]
 ```
 
@@ -81,21 +81,21 @@ flowchart LR
 
 ```mermaid
 graph LR
-    subgraph Input
-        CH[Multi-Channel<br/>Telegram / WhatsApp / Slack]
+    subgraph INP["Input"]
+        CH["Multi-Channel\nTelegram / WhatsApp / Slack"]
     end
 
-    subgraph Intelligence
-        COG[Cognitive Classifier<br/>Groq 8B — 100ms]
-        MEM[Memory System<br/>Episodic + Graph]
-        STIM[Stimulus Engine<br/>Weather + Traffic + Festival]
-        PULSE[Pulse Engine<br/>Engagement Scoring]
-        INF[Influence Engine<br/>CTA Strategy]
-        BEX[Bedrock Extractor<br/>Signal Extraction]
+    subgraph INTL["Intelligence"]
+        COG["Cognitive Classifier\nGroq 8B - 100ms"]
+        MEM["Memory System\nEpisodic + Graph"]
+        STIM["Stimulus Engine\nWeather + Traffic + Festival"]
+        PULSE["Pulse Engine\nEngagement Scoring"]
+        INF["Influence Engine\nCTA Strategy"]
+        BEX["Bedrock Extractor\nSignal Extraction"]
     end
 
-    subgraph Tools
-        SC[Scout Subagent<br/>Cache + Reflect + Normalize]
+    subgraph TLS["Tools"]
+        SC["Scout Subagent\nCache + Reflect + Normalize"]
         PL[Places Search]
         FL[Flights]
         HT[Hotels]
@@ -104,26 +104,26 @@ graph LR
         GC[Grocery Compare]
     end
 
-    subgraph Social
+    subgraph SOC["Social"]
         SQ[Squads]
         FG[Friend Graph]
         OW[Outbound Worker]
     end
 
-    subgraph Output
-        PE[Personality Engine<br/>SOUL.md + Tone]
-        LLM[70B Generator<br/>Groq Llama-3.3]
+    subgraph OUT["Output"]
+        PE["Personality Engine\nSOUL.md + Tone"]
+        LLM["70B Generator\nGroq Llama-3.3"]
     end
 
     CH --> COG
-    COG --> SC --> Tools
+    COG --> SC --> TLS
     MEM --> PE
     STIM --> PE
     PULSE --> INF --> PE
     BEX --> MEM
     SQ --> OW --> CH
     FG --> OW
-    Tools --> PE --> LLM --> CH
+    TLS --> PE --> LLM --> CH
 ```
 
 ## Tool Capabilities

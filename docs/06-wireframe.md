@@ -6,29 +6,29 @@ Aria operates as a **chat-native agent** — no separate app or dashboard requir
 
 ```mermaid
 graph TD
-    subgraph Screen 1 — First Contact
-        S1A["🤖 Aria: Hey! I'm Aria, your<br/>local travel guide 🌍<br/>What should I call you?"]
+    subgraph S1["Screen 1 - First Contact"]
+        S1A["🤖 Aria: Hey! I'm Aria, your\nlocal travel guide 🌍\nWhat should I call you?"]
         S1B["👤 User: Aditya"]
-        S1C["🤖 Aria: Nice to meet you,<br/>Aditya! Share your location<br/>so I can find spots near you"]
-        S1D["📍 [Share Location Button]"]
+        S1C["🤖 Aria: Nice to meet you,\nAditya! Share your location\nso I can find spots near you"]
+        S1D["📍 Share Location Button"]
     end
 
-    subgraph Screen 2 — Stimulus Trigger
-        S2A["🤖 Aria: It's raining in<br/>Hyderabad right now ☔<br/>Perfect weather for chai!<br/>Want me to find a cozy<br/>café nearby?"]
-        S2B["📱 [Yes, find me one]<br/>[No thanks]<br/>[Show indoor activities]"]
+    subgraph S2["Screen 2 - Stimulus Trigger"]
+        S2A["🤖 Aria: It's raining in\nHyderabad right now ☔\nPerfect weather for chai!\nWant me to find a cozy\ncafe nearby?"]
+        S2B["📱 Yes, find me one\nNo thanks\nShow indoor activities"]
     end
 
-    subgraph Screen 3 — Tool Execution
-        S3A["🤖 Aria: Found 3 great<br/>spots near Banjara Hills!"]
-        S3B["📍 Café Niloufer — ⭐ 4.5<br/>📍 Roastery Coffee — ⭐ 4.3<br/>📍 Autumn Leaf Café — ⭐ 4.6"]
-        S3C["📸 [Venue Photo]"]
-        S3D["🤖 Want directions to any<br/>of these? Or compare<br/>delivery prices?"]
+    subgraph S3["Screen 3 - Tool Execution"]
+        S3A["🤖 Aria: Found 3 great\nspots near Banjara Hills!"]
+        S3B["📍 Cafe Niloufer - ⭐ 4.5\n📍 Roastery Coffee - ⭐ 4.3\n📍 Autumn Leaf Cafe - ⭐ 4.6"]
+        S3C["📸 Venue Photo"]
+        S3D["🤖 Want directions to any\nof these? Or compare\ndelivery prices?"]
     end
 
-    subgraph Screen 4 — Price Comparison
-        S4A["👤 User: Compare food delivery<br/>prices for biryani near me"]
-        S4B["🤖 Aria: Comparing across<br/>Swiggy and Zomato..."]
-        S4C["📊 Paradise Biryani<br/>Swiggy: ₹299 + ₹30 delivery<br/>Zomato: ₹285 + ₹25 delivery<br/><br/>💡 Zomato is ₹19 cheaper!"]
+    subgraph S4["Screen 4 - Price Comparison"]
+        S4A["👤 User: Compare food delivery\nprices for biryani near me"]
+        S4B["🤖 Aria: Comparing across\nSwiggy and Zomato..."]
+        S4C["📊 Paradise Biryani\nSwiggy: ₹299 + ₹30 delivery\nZomato: ₹285 + ₹25 delivery\n💡 Zomato is ₹19 cheaper!"]
     end
 
     S1D --> S2A
@@ -40,15 +40,15 @@ graph TD
 
 ```mermaid
 graph TB
-    subgraph Frontend — Chat Interface
+    subgraph FE["Frontend - Chat Interface"]
         UI1[Message Input]
         UI2[Location Share Button]
         UI3[Inline Action Buttons]
-        UI4[Photo / Media Display]
-        UI5[Map Pin / Venue Cards]
+        UI4["Photo / Media Display"]
+        UI5["Map Pin / Venue Cards"]
     end
 
-    subgraph Backend — Aria Core
+    subgraph BK["Backend - Aria Core"]
         BE1[Fastify Webhook Server]
         BE2[Channel Adapter Layer]
         BE3[Handler Pipeline]
@@ -56,10 +56,10 @@ graph TB
         BE5[Response Composer]
     end
 
-    subgraph Data Layer
-        DL1[PostgreSQL<br/>Sessions, Memory, Preferences]
-        DL2[DynamoDB<br/>Engagement Metrics]
-        DL3[S3<br/>Training Archives]
+    subgraph DL["Data Layer"]
+        DL1["PostgreSQL\nSessions, Memory, Preferences"]
+        DL2["DynamoDB\nEngagement Metrics"]
+        DL3["S3\nTraining Archives"]
     end
 
     UI1 --> BE1

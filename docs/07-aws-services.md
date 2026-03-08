@@ -4,22 +4,22 @@
 
 ```mermaid
 graph TB
-    subgraph Aria Core
-        APP[Aria Application Server<br/>Fastify + Node.js]
+    subgraph AC["Aria Core"]
+        APP["Aria Application Server\nFastify + Node.js"]
     end
 
-    subgraph AWS — Active Services
-        BR[Amazon Bedrock<br/>Claude 3 Haiku<br/>Signal Extraction + Fallback LLM]
-        DDB[Amazon DynamoDB<br/>User State + Engagement Metrics]
-        S3[Amazon S3<br/>Training Data + Scout Archives]
-        CW[Amazon CloudWatch<br/>Pipeline Metrics + Dashboard]
+    subgraph AWS_A["AWS - Active Services"]
+        BR["Amazon Bedrock\nClaude 3 Haiku\nSignal Extraction + Fallback LLM"]
+        DDB["Amazon DynamoDB\nUser State + Engagement Metrics"]
+        S3["Amazon S3\nTraining Data + Scout Archives"]
+        CW["Amazon CloudWatch\nPipeline Metrics + Dashboard"]
     end
 
-    subgraph AWS — Provisioned, Activation-Ready
-        SNS[Amazon SNS<br/>Squad Notifications<br/>Disabled: cost optimization]
-        EB[Amazon EventBridge<br/>Cron Rule Scheduling<br/>Disabled: using local cron]
-        EC[Amazon ElastiCache<br/>Redis Session Cache<br/>Disabled: using in-process cache]
-        LM[AWS Lambda<br/>Proactive Job Runner<br/>Disabled: using local scheduler]
+    subgraph AWS_P["AWS - Provisioned, Activation-Ready"]
+        SNS["Amazon SNS\nSquad Notifications\nDisabled: cost optimization"]
+        EB["Amazon EventBridge\nCron Rule Scheduling\nDisabled: using local cron"]
+        EC["Amazon ElastiCache\nRedis Session Cache\nDisabled: using in-process cache"]
+        LM["AWS Lambda\nProactive Job Runner\nDisabled: using local scheduler"]
     end
 
     APP -->|Active| BR
@@ -121,7 +121,7 @@ Each internal subagent gets its own scoped `AwsClientFactory` instance — **no 
 
 ```mermaid
 graph LR
-    subgraph Subagents
+    subgraph SA["Subagents"]
         P[Pulse]
         A[Archivist]
         S[Scout]
@@ -129,7 +129,7 @@ graph LR
         SO[Social]
     end
 
-    subgraph AWS Services Used
+    subgraph ASU["AWS Services Used"]
         PF["DynamoDB + CloudWatch"]
         AF["S3 + DynamoDB + Bedrock"]
         SF["S3"]

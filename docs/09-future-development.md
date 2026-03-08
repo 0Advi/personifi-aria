@@ -13,25 +13,25 @@
 ```mermaid
 timeline
     title Development Roadmap
-    section Phase 1 — Foundation (Complete)
+    section Phase 1 - Foundation (Complete)
         Dual-model pipeline          : 8B classifier + 70B generator
         Stimulus engine              : Weather, traffic, festival
         Social system                : Squads, friend graph, cascade bridge
         AWS integration             : Bedrock, DynamoDB, S3, CloudWatch
 
-    section Phase 2 — Deeper Intelligence
+    section Phase 2 - Deeper Intelligence
         Voice input                  : Whisper API for voice notes
         Image understanding          : Multimodal (food photos, tickets)
         ElastiCache activation       : Redis distributed session cache
         SNS activation               : Multi-channel squad notifications
 
-    section Phase 3 — Scale & Optimize
+    section Phase 3 - Scale and Optimize
         EventBridge + Lambda         : Serverless scheduling and tool execution
         A/B influence testing        : Optimize CTA strategies via metrics
         Multi-language support       : Hindi, Telugu personality variants
         SQS stimulus queue           : Decoupled event processing
 
-    section Phase 4 — Cross-Domain Agents
+    section Phase 4 - Cross-Domain Agents
         Agriculture agent           : Soil + weather + market stimuli
         Healthcare agent            : AQI + vitals + medication stimuli
         Education agent             : Study patterns + exam schedule stimuli
