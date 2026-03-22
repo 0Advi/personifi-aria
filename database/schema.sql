@@ -98,6 +98,22 @@ CREATE TABLE price_alerts (
 CREATE INDEX idx_price_alerts_user ON price_alerts(user_id);
 CREATE INDEX idx_price_alerts_active ON price_alerts(is_active);
 
+-- Lightweight user reminders for Alpha tool-calling
+CREATE TABLE IF NOT EXISTS user_reminders (
+    reminder_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    message TEXT NOT NULL,
+    time_text TEXT NOT NULL,
+    scheduled_for TIMESTAMP WITH TIME ZONE,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'scheduled', 'sent', 'cancelled')),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_user_reminders_user_status ON user_reminders(user_id, status, created_at DESC);
+CREATE INDEX idx_user_reminders_scheduled ON user_reminders(scheduled_for);
+
 -- Scraped media from Instagram/TikTok (media cron)
 CREATE TABLE IF NOT EXISTS scraped_media (
     id SERIAL PRIMARY KEY,
@@ -119,4 +135,3 @@ CREATE TABLE IF NOT EXISTS scraped_media (
 CREATE INDEX idx_scraped_media_keyword ON scraped_media(keyword);
 CREATE INDEX idx_scraped_media_platform ON scraped_media(platform);
 CREATE INDEX idx_scraped_media_expires ON scraped_media(url_expires_at);
-

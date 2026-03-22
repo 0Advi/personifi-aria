@@ -40,6 +40,9 @@ services:
       # Fusion architecture (Phase 1)
       - FUSION_ENGINE_ENABLED=${FUSION_ENGINE_ENABLED:-false}
       - SOUL_V2_ENABLED=${SOUL_V2_ENABLED:-false}
+      - HANDLER_VERSION=${HANDLER_VERSION:-legacy}
+      - ALPHA_HANDLER_ENABLED=${ALPHA_HANDLER_ENABLED:-false}
+      - ALPHA_AB_MODE=${ALPHA_AB_MODE:-false}
       # Identity
       - LINK_CODE_EXPIRY_MINUTES=${LINK_CODE_EXPIRY_MINUTES:-10}
       # Travel tools
