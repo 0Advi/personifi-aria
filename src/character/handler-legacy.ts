@@ -73,7 +73,7 @@ import { setScene, toolToFlow } from '../character/scene-manager.js'
 import { generateResponse, type ChatMessage } from '../llm/tierManager.js'
 
 // Proactive content registration + activity tracking
-import { registerProactiveUser, updateUserActivity } from '../media/proactiveRunner.js'
+import { updateUserActivity } from '../media/proactiveRunner.js'
 import { handleFunnelReply } from '../proactive-intent/index.js'
 import { handleTaskReply } from '../task-orchestrator/index.js'
 import { addFriend, acceptFriend, removeFriend, getFriends, getPendingRequests, resolveUserByPlatformId } from '../social/friend-graph.js'

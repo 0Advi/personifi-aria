@@ -45,6 +45,229 @@ const GLOBAL_TOOL_LIMIT = 100
 const rateLimits = new Map<string, { count: number; resetAt: number }>()
 const globalRateWindow: number[] = []
 
+const buildRepairCandidates = (trimmed: string): string[] => {
+    const candidates = [trimmed]
+    if (!trimmed.endsWith('}')) {
+        candidates.push(`${trimmed}}`, `${trimmed}"}`)
+    }
+
+    const normalizedQuotes = trimmed.replace(/'/g, '"')
+    if (normalizedQuotes !== trimmed) {
+        candidates.push(normalizedQuotes)
+    }
+
+    return candidates
+}
+
+const buildExecutionFailure = (
+    toolName: string,
+    args: ToolArgs,
+    executionMs: number,
+    error?: string,
+    repairAttempted?: boolean,
+    data: unknown = null,
+    timedOut?: boolean,
+): SandboxExecutionResult => ({
+    success: false,
+    toolName,
+    args,
+    data,
+    error,
+    executionMs,
+    repairAttempted,
+    timedOut,
+})
+
+const buildZodField = (
+    property: ToolSchema['function']['parameters']['properties'][string],
+): ZodTypeAny => {
+    if (Array.isArray(property.enum) && property.enum.length > 0) {
+        return z.enum(property.enum as [string, ...string[]])
+    }
+    if (property.type === 'number') {
+        return z.number()
+    }
+    if (property.type === 'boolean') {
+        return z.boolean()
+    }
+    return z.string().min(1)
+}
+
+const buildZodSchema = (schema: ToolSchema): ZodTypeAny => {
+    const required = new Set(schema.function.parameters.required ?? [])
+    const shape: Record<string, ZodTypeAny> = {}
+
+    for (const [name, property] of Object.entries(schema.function.parameters.properties)) {
+        const field = buildZodField(property)
+        shape[name] = required.has(name) ? field : field.optional()
+    }
+
+    return z.object(shape)
+}
+
+const coerceToolValue = (
+    value: unknown,
+    type: ToolSchema['function']['parameters']['properties'][string]['type'],
+): unknown => {
+    if (type === 'number' && typeof value === 'string') {
+        const parsedNumber = Number(value)
+        return Number.isNaN(parsedNumber) ? value : parsedNumber
+    }
+
+    if (type === 'boolean' && typeof value === 'string') {
+        const lowered = value.toLowerCase()
+        if (lowered === 'true') return true
+        if (lowered === 'false') return false
+    }
+
+    return value
+}
+
+const coerceArgs = (parsed: ToolArgs, schema: ToolSchema): ToolArgs =>
+    Object.fromEntries(
+        Object.entries(parsed).map(([key, value]) => {
+            const property = schema.function.parameters.properties[key]
+            return [key, property ? coerceToolValue(value, property.type) : value]
+        }),
+    )
+
+const findMissingRequiredField = (result: ReturnType<ZodTypeAny['safeParse']>): string | undefined => {
+    if (result.success) return undefined
+
+    const issue = result.error.issues.find(candidate =>
+        candidate.code === 'invalid_type' && (candidate as { input?: unknown }).input === undefined,
+    )
+
+    return typeof issue?.path?.[0] === 'string' ? issue.path[0] : undefined
+}
+
+const getErrorMessage = (error: unknown): string =>
+    error instanceof Error ? error.message : String(error)
+
+const injectUserContextField = (
+    toolName: string,
+    args: ToolArgs,
+    userContext: ToolArgs | undefined,
+    missingField: string | undefined,
+): ToolArgs | null => {
+    if (!missingField || !userContext || !(missingField in userContext)) {
+        return null
+    }
+
+    logger.debug('[Alpha/Sandbox] Injected default from user context', {
+        toolName,
+        missingField,
+    })
+
+    return {
+        ...args,
+        [missingField]: userContext[missingField],
+    }
+}
+
+const isToolArgs = (value: unknown): value is ToolArgs =>
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const tryParseToolArgs = (candidate: string): ToolArgs | null => {
+    try {
+        const parsed: unknown = JSON.parse(candidate)
+        return isToolArgs(parsed) ? parsed : null
+    } catch {
+        return null
+    }
+}
+
+const repairJson = (jsonStr: string): ToolArgs | null => {
+    const trimmed = jsonStr.trim()
+    if (!trimmed) return {}
+
+    for (const candidate of buildRepairCandidates(trimmed)) {
+        const parsed = tryParseToolArgs(candidate)
+        if (parsed) return parsed
+    }
+
+    return null
+}
+
+const parseToolArgs = (argsStr: string): ParsedArgsResult => {
+    const direct = tryParseToolArgs(argsStr || '{}')
+    if (direct) {
+        return { args: direct, repairAttempted: false }
+    }
+
+    const repaired = repairJson(argsStr)
+    if (!repaired) {
+        return {
+            args: null,
+            error: 'Malformed JSON arguments',
+            repairAttempted: false,
+        }
+    }
+
+    logger.debug('[Alpha/Sandbox] Repaired malformed JSON arguments')
+    return {
+        args: repaired,
+        repairAttempted: true,
+    }
+}
+
+const validateSchemaArgs = (
+    toolName: string,
+    args: ToolArgs,
+    zodSchema: ZodTypeAny,
+    userContext: ToolArgs | undefined,
+    repairAttempted: boolean,
+): SchemaValidationOutcome => {
+    let currentArgs = args
+    let currentRepairAttempted = repairAttempted
+    let parsedResult = zodSchema.safeParse(currentArgs)
+
+    const missingField = findMissingRequiredField(parsedResult)
+    if (missingField) {
+        logger.debug('[Alpha/Sandbox] Schema missing required field', {
+            toolName,
+            missingField,
+        })
+
+        const repairedArgs = injectUserContextField(toolName, currentArgs, userContext, missingField)
+        if (repairedArgs) {
+            currentArgs = repairedArgs
+            currentRepairAttempted = true
+            parsedResult = zodSchema.safeParse(currentArgs)
+        }
+    }
+
+    if (!parsedResult.success) {
+        return {
+            valid: false,
+            args: currentArgs,
+            error: parsedResult.error.issues[0]?.message ?? 'Schema validation failed',
+            repairAttempted: currentRepairAttempted,
+        }
+    }
+
+    return {
+        valid: true,
+        args: parsedResult.data as ToolArgs,
+        repairAttempted: currentRepairAttempted,
+    }
+}
+
+const withTimeout = <T>(promise: Promise<T>, timeoutMs: number): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(TOOL_TIMEOUT_MESSAGE)), timeoutMs)
+        promise.then(
+            value => {
+                clearTimeout(timer)
+                resolve(value)
+            },
+            error => {
+                clearTimeout(timer)
+                reject(error)
+            },
+        )
+    })
+
 export class ToolSandbox {
     private definitions: ToolSchema[]
     private schemaMap: Map<string, ZodTypeAny>
@@ -195,226 +418,3 @@ export class ToolSandbox {
         }
     }
 }
-
-const buildRepairCandidates = (trimmed: string): string[] => {
-    const candidates = [trimmed]
-    if (!trimmed.endsWith('}')) {
-        candidates.push(`${trimmed}}`, `${trimmed}"}`)
-    }
-
-    const normalizedQuotes = trimmed.replace(/'/g, '"')
-    if (normalizedQuotes !== trimmed) {
-        candidates.push(normalizedQuotes)
-    }
-
-    return candidates
-}
-
-const buildExecutionFailure = (
-    toolName: string,
-    args: ToolArgs,
-    executionMs: number,
-    error?: string,
-    repairAttempted?: boolean,
-    data: unknown = null,
-    timedOut?: boolean,
-): SandboxExecutionResult => ({
-    success: false,
-    toolName,
-    args,
-    data,
-    error,
-    executionMs,
-    repairAttempted,
-    timedOut,
-})
-
-const buildZodField = (
-    property: ToolSchema['function']['parameters']['properties'][string],
-): ZodTypeAny => {
-    if (Array.isArray(property.enum) && property.enum.length > 0) {
-        return z.enum(property.enum as [string, ...string[]])
-    }
-    if (property.type === 'number') {
-        return z.number()
-    }
-    if (property.type === 'boolean') {
-        return z.boolean()
-    }
-    return z.string().min(1)
-}
-
-const buildZodSchema = (schema: ToolSchema): ZodTypeAny => {
-    const required = new Set(schema.function.parameters.required ?? [])
-    const shape: Record<string, ZodTypeAny> = {}
-
-    for (const [name, property] of Object.entries(schema.function.parameters.properties)) {
-        const field = buildZodField(property)
-        shape[name] = required.has(name) ? field : field.optional()
-    }
-
-    return z.object(shape)
-}
-
-const coerceArgs = (parsed: ToolArgs, schema: ToolSchema): ToolArgs =>
-    Object.fromEntries(
-        Object.entries(parsed).map(([key, value]) => {
-            const property = schema.function.parameters.properties[key]
-            return [key, property ? coerceToolValue(value, property.type) : value]
-        }),
-    )
-
-const coerceToolValue = (
-    value: unknown,
-    type: ToolSchema['function']['parameters']['properties'][string]['type'],
-): unknown => {
-    if (type === 'number' && typeof value === 'string') {
-        const parsedNumber = Number(value)
-        return Number.isNaN(parsedNumber) ? value : parsedNumber
-    }
-
-    if (type === 'boolean' && typeof value === 'string') {
-        const lowered = value.toLowerCase()
-        if (lowered === 'true') return true
-        if (lowered === 'false') return false
-    }
-
-    return value
-}
-
-const findMissingRequiredField = (result: ReturnType<ZodTypeAny['safeParse']>): string | undefined => {
-    if (result.success) return undefined
-
-    const issue = result.error.issues.find(candidate =>
-        candidate.code === 'invalid_type' && (candidate as { input?: unknown }).input === undefined,
-    )
-
-    return typeof issue?.path?.[0] === 'string' ? issue.path[0] : undefined
-}
-
-const getErrorMessage = (error: unknown): string =>
-    error instanceof Error ? error.message : String(error)
-
-const injectUserContextField = (
-    toolName: string,
-    args: ToolArgs,
-    userContext: ToolArgs | undefined,
-    missingField: string | undefined,
-): ToolArgs | null => {
-    if (!missingField || !userContext || !(missingField in userContext)) {
-        return null
-    }
-
-    logger.debug('[Alpha/Sandbox] Injected default from user context', {
-        toolName,
-        missingField,
-    })
-
-    return {
-        ...args,
-        [missingField]: userContext[missingField],
-    }
-}
-
-const isToolArgs = (value: unknown): value is ToolArgs =>
-    typeof value === 'object' && value !== null && !Array.isArray(value)
-
-const parseToolArgs = (argsStr: string): ParsedArgsResult => {
-    const direct = tryParseToolArgs(argsStr || '{}')
-    if (direct) {
-        return { args: direct, repairAttempted: false }
-    }
-
-    const repaired = repairJson(argsStr)
-    if (!repaired) {
-        return {
-            args: null,
-            error: 'Malformed JSON arguments',
-            repairAttempted: false,
-        }
-    }
-
-    logger.debug('[Alpha/Sandbox] Repaired malformed JSON arguments')
-    return {
-        args: repaired,
-        repairAttempted: true,
-    }
-}
-
-const repairJson = (jsonStr: string): ToolArgs | null => {
-    const trimmed = jsonStr.trim()
-    if (!trimmed) return {}
-
-    for (const candidate of buildRepairCandidates(trimmed)) {
-        const parsed = tryParseToolArgs(candidate)
-        if (parsed) return parsed
-    }
-
-    return null
-}
-
-const tryParseToolArgs = (candidate: string): ToolArgs | null => {
-    try {
-        const parsed: unknown = JSON.parse(candidate)
-        return isToolArgs(parsed) ? parsed : null
-    } catch {
-        return null
-    }
-}
-
-const validateSchemaArgs = (
-    toolName: string,
-    args: ToolArgs,
-    zodSchema: ZodTypeAny,
-    userContext: ToolArgs | undefined,
-    repairAttempted: boolean,
-): SchemaValidationOutcome => {
-    let currentArgs = args
-    let currentRepairAttempted = repairAttempted
-    let parsedResult = zodSchema.safeParse(currentArgs)
-
-    const missingField = findMissingRequiredField(parsedResult)
-    if (missingField) {
-        logger.debug('[Alpha/Sandbox] Schema missing required field', {
-            toolName,
-            missingField,
-        })
-
-        const repairedArgs = injectUserContextField(toolName, currentArgs, userContext, missingField)
-        if (repairedArgs) {
-            currentArgs = repairedArgs
-            currentRepairAttempted = true
-            parsedResult = zodSchema.safeParse(currentArgs)
-        }
-    }
-
-    if (!parsedResult.success) {
-        return {
-            valid: false,
-            args: currentArgs,
-            error: parsedResult.error.issues[0]?.message ?? 'Schema validation failed',
-            repairAttempted: currentRepairAttempted,
-        }
-    }
-
-    return {
-        valid: true,
-        args: parsedResult.data as ToolArgs,
-        repairAttempted: currentRepairAttempted,
-    }
-}
-
-const withTimeout = <T>(promise: Promise<T>, timeoutMs: number): Promise<T> =>
-    new Promise<T>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(TOOL_TIMEOUT_MESSAGE)), timeoutMs)
-        promise.then(
-            value => {
-                clearTimeout(timer)
-                resolve(value)
-            },
-            error => {
-                clearTimeout(timer)
-                reject(error)
-            },
-        )
-    })
