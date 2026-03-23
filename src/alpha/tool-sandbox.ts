@@ -1,13 +1,15 @@
 import { z, type ZodTypeAny } from 'zod'
 import type { ToolExecutionResult } from '../hooks.js'
 import type { AlphaToolDefinition } from '../tool-definitions.js'
+import type { ToolArgs } from '../llm/tool-contracts.js'
+import { logger } from '../utils/logger.js'
 
 export type ToolSchema = AlphaToolDefinition
 
 export interface ValidationResult {
     valid: boolean
     toolName: string
-    args: Record<string, any>
+    args: ToolArgs
     error?: string
     repairAttempted?: boolean
 }
@@ -15,7 +17,7 @@ export interface ValidationResult {
 export interface SandboxExecutionResult {
     success: boolean
     toolName: string
-    args: Record<string, any>
+    args: ToolArgs
     data: unknown
     error?: string
     executionMs: number
@@ -59,7 +61,7 @@ export class ToolSandbox {
         return true
     }
 
-    private repairJson(jsonStr: string): Record<string, any> | null {
+    private repairJson(jsonStr: string): ToolArgs | null {
         const trimmed = jsonStr.trim()
         if (!trimmed) return {}
 
@@ -75,7 +77,7 @@ export class ToolSandbox {
         return null
     }
 
-    private coerceArgs(parsed: Record<string, any>, schema: ToolSchema): Record<string, any> {
+    private coerceArgs(parsed: ToolArgs, schema: ToolSchema): ToolArgs {
         const props = schema.function.parameters.properties
         const coerced = { ...parsed }
 
@@ -90,8 +92,9 @@ export class ToolSandbox {
             }
 
             if (propSchema.type === 'boolean' && typeof coerced[key] === 'string') {
-                if (coerced[key].toLowerCase() === 'true') coerced[key] = true
-                if (coerced[key].toLowerCase() === 'false') coerced[key] = false
+                const lowered = coerced[key].toLowerCase()
+                if (lowered === 'true') coerced[key] = true
+                if (lowered === 'false') coerced[key] = false
             }
         }
 
@@ -102,27 +105,28 @@ export class ToolSandbox {
         userId: string,
         toolName: string,
         argsStr: string,
-        userContext?: Record<string, any>,
+        userContext?: ToolArgs,
     ): ValidationResult {
         if (!this.checkRateLimit(userId, toolName)) {
-            console.log(`[Alpha/Sandbox] REJECTED rate limit exceeded: "${toolName}"`)
+            logger.warn('[Alpha/Sandbox] Tool rejected: rate limit exceeded', { toolName, userId })
             return { valid: false, toolName, args: {}, error: 'Rate limit exceeded for tool' }
         }
 
         const schema = this.definitions.find(def => def.function.name === toolName)
         if (!schema) {
-            console.log(`[Alpha/Sandbox] REJECTED phantom tool: "${toolName}" — not in schema`)
+            logger.warn('[Alpha/Sandbox] Tool rejected: not in schema', { toolName, userId })
             return { valid: false, toolName, args: {}, error: 'Tool not found in definitions' }
         }
 
-        let parsed: Record<string, any>
+        let parsed: ToolArgs
         let repairAttempted = false
 
         try {
-            parsed = JSON.parse(argsStr || '{}')
-            if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+            const parsedJson: unknown = JSON.parse(argsStr || '{}')
+            if (!isToolArgs(parsedJson)) {
                 return { valid: false, toolName, args: {}, error: 'Parsed arguments did not yield an object.' }
             }
+            parsed = parsedJson
         } catch {
             const repaired = this.repairJson(argsStr)
             if (!repaired) {
@@ -130,11 +134,15 @@ export class ToolSandbox {
             }
             parsed = repaired
             repairAttempted = true
-            console.log('[Alpha/Sandbox] Repair attempt: fixed JSON syntax')
+            logger.debug('[Alpha/Sandbox] Repaired malformed JSON arguments', { toolName })
         }
 
         parsed = this.coerceArgs(parsed, schema)
-        console.log(`[Alpha/Sandbox] Validating tool call: ${toolName} ${JSON.stringify(parsed)}`)
+        logger.debug('[Alpha/Sandbox] Validating tool call', {
+            toolName,
+            argKeys: Object.keys(parsed),
+            repairAttempted,
+        })
 
         const zodSchema = this.schemaMap.get(toolName)
         if (!zodSchema) {
@@ -149,11 +157,17 @@ export class ToolSandbox {
             )
             const missingField = typeof missing?.path?.[0] === 'string' ? missing.path[0] : undefined
             if (missingField) {
-                console.log(`[Alpha/Sandbox] Schema check: FAIL — missing required field "${missingField}"`)
+                logger.debug('[Alpha/Sandbox] Schema missing required field', {
+                    toolName,
+                    missingField,
+                })
                 if (userContext && missingField in userContext) {
                     parsed[missingField] = userContext[missingField]
                     repairAttempted = true
-                    console.log('[Alpha/Sandbox] Repair attempt: injected default from user context')
+                    logger.debug('[Alpha/Sandbox] Injected default from user context', {
+                        toolName,
+                        missingField,
+                    })
                     parsedResult = zodSchema.safeParse(parsed)
                 }
             }
@@ -170,16 +184,16 @@ export class ToolSandbox {
             }
         }
 
-        console.log('[Alpha/Sandbox] Schema check: PASS')
-        return { valid: true, toolName, args: parsedResult.data as Record<string, any>, repairAttempted }
+        logger.debug('[Alpha/Sandbox] Schema validation passed', { toolName })
+        return { valid: true, toolName, args: parsedResult.data as ToolArgs, repairAttempted }
     }
 
     async executeToolCall(
         userId: string,
         toolName: string,
         argsStr: string,
-        executor: (args: Record<string, any>) => Promise<ToolExecutionResult>,
-        opts?: { userContext?: Record<string, any>; timeoutMs?: number },
+        executor: (args: ToolArgs) => Promise<ToolExecutionResult>,
+        opts?: { userContext?: ToolArgs; timeoutMs?: number },
     ): Promise<SandboxExecutionResult> {
         const validation = this.validateToolCall(userId, toolName, argsStr, opts?.userContext)
         if (!validation.valid) {
@@ -270,4 +284,8 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
             },
         )
     })
+}
+
+function isToolArgs(value: unknown): value is ToolArgs {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

@@ -37,6 +37,7 @@ import {
 import { sanitizeInput, logSuspiciousInput, isPotentialAttack } from './sanitize.js'
 import { filterOutput, needsHumanReview } from './output-filter.js'
 import { safeError } from '../utils/safe-log.js'
+import { logger } from '../utils/logger.js'
 
 // DEV 3: The Soul — memory, cognition, personality
 import { searchMemories } from '../memory-store.js'
@@ -84,6 +85,11 @@ import { handleOnboarding, type OnboardingResult } from '../onboarding/onboardin
 import { extractRejectionSignals, persistRejectionSignals, entityTypeToCategory } from '../intelligence/rejection-memory.js'
 import { resolveToolFromTopic } from '../topic-intent/tool-map.js'
 import { logExecutionBridge, logTopicCompleted } from '../topic-intent/logger.js'
+import {
+  extractMediaFromToolResult,
+  extractVenuesFromToolResult,
+  buildVenuePreviewMedia,
+} from './response-artifacts.js'
 
 // Initialize Groq client
 const groq = new Groq({
@@ -383,132 +389,6 @@ export async function saveUserLocation(userId: string, location: string): Promis
 }
 
 /**
- * Extract images from tool raw data for sending as Telegram photos.
- * Supports:
- *   - Food comparison (Swiggy dish images via raw[].items[].imageUrl)
- *   - Grocery comparison (Blinkit/Instamart/Zepto via data.images[])
- *   - Single-platform food search (raw[].items[].imageUrl)
- */
-function extractMediaFromToolResult(toolName: string | null | undefined, rawData: unknown): MessageResponse['media'] | undefined {
-  if (toolName !== 'search_places') return undefined
-  if (!rawData || typeof rawData !== 'object') return undefined
-
-  const data = rawData as any
-  const isMapPreviewUrl = (url: string): boolean => /maps\.googleapis\.com\/maps\/api\/staticmap/i.test(url)
-
-  // Diagnostic: trace what rawData looks like
-  const keys = data ? Object.keys(data) : []
-  const hasImages = Array.isArray(data?.images)
-  const imagesCount = hasImages ? data.images.length : 0
-  console.log(`[extractMedia] keys=${keys.join(',')} | hasImages=${hasImages} | imagesCount=${imagesCount} | firstImageUrl=${data?.images?.[0]?.url?.substring(0, 60) ?? 'N/A'}`)
-
-  // Grocery comparison: has a top-level images[] array with {url, caption}
-  if (Array.isArray(data?.images)) {
-    const media = data.images
-      .filter((img: any) => typeof img?.url === 'string' && !isMapPreviewUrl(img.url))
-      .slice(0, 6)
-      .map((img: any) => ({
-        type: 'photo' as const,
-        url: img.url,
-        caption: img.caption,
-      }))
-    if (media.length > 0) return media
-  }
-
-  // Food comparison: raw[] contains restaurant objects with items[].imageUrl
-  const results = data?.raw ?? data
-  if (!Array.isArray(results)) return undefined
-
-  const media: { type: 'photo'; url: string; caption?: string }[] = []
-
-  for (const r of results) {
-    // Restaurant-level image
-    if (r?.restaurantImageUrl && media.length === 0) {
-      // Only add restaurant image if no dish images yet
-    }
-    if (!r?.items || !Array.isArray(r.items)) continue
-    for (const item of r.items) {
-      if (item.imageUrl && media.length < 5) {
-        const badge = item.isBestseller ? ' ⭐ BESTSELLER' : ''
-        media.push({
-          type: 'photo',
-          url: item.imageUrl,
-          caption: `${item.name} — ₹${item.price}${badge}\n📍 ${r.restaurant} (${r.platform})`,
-        })
-      }
-    }
-  }
-
-  return media.length > 0 ? media : undefined
-}
-
-/**
- * Extract venue pin data from tool raw results for Telegram sendVenue.
- * Supports:
- *   - search_places → raw[].location.latitude/longitude + displayName/formattedAddress
- *   - get_directions → destination lat/lng from route legs
- */
-function extractVenuesFromToolResult(
-  toolName: string | null | undefined,
-  rawData: unknown
-): MessageResponse['venues'] | undefined {
-  if (!rawData || typeof rawData !== 'object') return undefined
-
-  const data = rawData as any
-
-  // Places API: raw data has a places[] array (or data.raw has it)
-  if (toolName === 'search_places') {
-    const places = data?.raw ?? data
-    if (!Array.isArray(places)) return undefined
-
-    const venues: { name: string; address: string; lat: number; lng: number }[] = []
-    for (const place of places.slice(0, 3)) {
-      const name = place.displayName?.text || place.name
-      const address = place.formattedAddress || place.address || ''
-      const lat = place.location?.latitude ?? place.location?.lat
-      const lng = place.location?.longitude ?? place.location?.lng
-      if (name && typeof lat === 'number' && typeof lng === 'number') {
-        venues.push({ name, address, lat, lng })
-      }
-    }
-    return venues.length > 0 ? venues : undefined
-  }
-
-  // Directions API: destination from route legs
-  if (toolName === 'get_directions') {
-    const routes = data?.raw?.routes ?? data?.routes
-    if (!Array.isArray(routes) || routes.length === 0) return undefined
-    const leg = routes[0]?.legs?.[routes[0]?.legs?.length - 1]
-    if (!leg?.end_location) return undefined
-    return [{
-      name: leg.end_address?.split(',')[0] || 'Destination',
-      address: leg.end_address || '',
-      lat: leg.end_location.lat,
-      lng: leg.end_location.lng,
-    }]
-  }
-
-  return undefined
-}
-
-function buildVenuePreviewMedia(
-  venues: MessageResponse['venues'] | undefined,
-  locationLabel?: string | null,
-): MessageResponse['media'] | undefined {
-  if (!venues || venues.length === 0) return undefined
-  const first = venues[0]
-  const key = process.env.GOOGLE_MAPS_API_KEY
-  if (!key) return undefined
-
-  const mapUrl = `https://maps.googleapis.com/maps/api/staticmap?center=${first.lat},${first.lng}&zoom=15&size=900x500&markers=color:red%7C${first.lat},${first.lng}&key=${key}`
-  const caption = locationLabel
-    ? `📍 ${first.name} (${locationLabel})`
-    : `📍 ${first.name}`
-
-  return [{ type: 'photo', url: mapUrl, caption }]
-}
-
-/**
  * Compact formatter for compare_prices_proactive results.
  * Keeps tool context under 400 tokens so the 70B model stays within budget.
  */
@@ -574,7 +454,10 @@ export async function handleMessage(
     let onboardingResult: OnboardingResult | null = options.onboardingResult ?? null
     if (!options.bypassOnboarding && !user.authenticated) {
       onboardingResult = await handleOnboarding(user.userId, userMessage).catch(err => {
-        console.warn('[handler] Onboarding handling failed:', safeError(err))
+        logger.warn('[handler] Onboarding handling failed', {
+          userId: user.userId,
+          error: safeError(err),
+        })
         return { handled: false as const }
       })
     }
@@ -602,7 +485,10 @@ export async function handleMessage(
     // classifier/memory pipeline. This avoids funnel-state collisions.
     if (channel === 'telegram' && !lightweightOnboarding) {
       const funnelReply = await handleFunnelReply(channelUserId, userMessage).catch(err => {
-        console.warn('[handler] Funnel reply handling failed, continuing normal pipeline:', safeError(err))
+        logger.warn('[handler] Funnel reply handling failed, continuing normal pipeline', {
+          channelUserId,
+          error: safeError(err),
+        })
         return { handled: false as const }
       })
       if (funnelReply.handled) {
@@ -615,7 +501,10 @@ export async function handleMessage(
     // classifier/memory pipeline. Supports multi-step actionable flows.
     if (channel === 'telegram' && !lightweightOnboarding) {
       const taskReply = await handleTaskReply(channelUserId, userMessage).catch(err => {
-        console.warn('[handler] Task orchestrator reply handling failed, continuing normal pipeline:', safeError(err))
+        logger.warn('[handler] Task orchestrator reply handling failed, continuing normal pipeline', {
+          channelUserId,
+          error: safeError(err),
+        })
         return { handled: false as const } as const
       })
       if (taskReply.handled && taskReply.response) {
@@ -651,7 +540,7 @@ export async function handleMessage(
       )
 
     if (!lightweightOnboarding) {
-      console.log('[handler] Classification:', {
+      logger.debug('[handler] Classification', {
         complexity: classification.message_complexity,
         needsTool: classification.needs_tool,
         toolHint: classification.tool_hint,
@@ -716,9 +605,15 @@ export async function handleMessage(
         classification.skip_memory
           ? Promise.resolve([])
           : scoredMemorySearch(searchUserIds.length > 1 ? searchUserIds : user.userId, memoryQuery, 5).catch(err => {
-            console.warn('[handler] Composite memory search failed, falling back to cosine:', safeError(err))
+            logger.warn('[handler] Composite memory search failed, falling back to cosine', {
+              userId: user.userId,
+              error: safeError(err),
+            })
             return searchMemories(searchUserIds.length > 1 ? searchUserIds : user.userId, memoryQuery, 5).catch(err2 => {
-              console.error('[handler] Memory search failed:', safeError(err2))
+              logger.error('[handler] Memory search failed', {
+                userId: user.userId,
+                error: safeError(err2),
+              })
               return [] as Awaited<ReturnType<typeof searchMemories>>
             })
           }),
@@ -726,22 +621,36 @@ export async function handleMessage(
         classification.skip_graph
           ? Promise.resolve([])
           : searchGraph(searchUserIds.length > 1 ? searchUserIds : user.userId, userMessage, 2, 10).catch(err => {
-            console.error('[handler] Graph search failed:', safeError(err))
+            logger.error('[handler] Graph search failed', {
+              userId: user.userId,
+              error: safeError(err),
+            })
             return [] as Awaited<ReturnType<typeof searchGraph>>
           }),
         // Load user preferences
         loadPreferences(pool, user.userId).catch(err => {
-          console.error('[handler] Preferences load failed:', safeError(err))
+          logger.error('[handler] Preferences load failed', {
+            userId: user.userId,
+            error: safeError(err),
+          })
           return {}
         }),
         // Fetch active conversation goal
         getActiveGoal(user.userId, session.sessionId).catch(err => {
-          console.error('[handler] Goal fetch failed:', safeError(err))
+          logger.error('[handler] Goal fetch failed', {
+            userId: user.userId,
+            sessionId: session.sessionId,
+            error: safeError(err),
+          })
           return null
         }),
         // Fetch agenda stack (top priorities) — separate from classifier activeGoal.
         agendaPlanner.getStack(user.userId, session.sessionId).catch(err => {
-          console.error('[handler] Agenda stack fetch failed:', safeError(err))
+          logger.error('[handler] Agenda stack fetch failed', {
+            userId: user.userId,
+            sessionId: session.sessionId,
+            error: safeError(err),
+          })
           return []
         }),
         // Pulse engagement state — non-blocking read from in-memory hot cache
@@ -783,10 +692,16 @@ export async function handleMessage(
           pulseScore: 0,
         })
           .then(output => {
-            console.log(`[Fusion/Reactive] user=${user.userId} route=${output.decision} confidence=${output.confidence.toFixed(2)} proactive=${output.proactiveContext?.length ?? 0} invalidated=${output.invalidatedStimuli.length}`)
+            logger.debug('[Fusion/Reactive] Completed', {
+              userId: user.userId,
+              route: output.decision,
+              confidence: output.confidence,
+              proactiveCount: output.proactiveContext?.length ?? 0,
+              invalidatedCount: output.invalidatedStimuli.length,
+            })
           })
-          .catch(err => console.error('[Fusion/Reactive] error:', (err as Error).message))
-      ).catch(err => console.error('[Fusion/Reactive] import error:', (err as Error).message))
+          .catch(err => logger.error('[Fusion/Reactive] error', { message: (err as Error).message }))
+      ).catch(err => logger.error('[Fusion/Reactive] import error', { message: (err as Error).message }))
     }
 
     // ─── Step 7: Brain hooks — route message (Dev 1) ──────────────
@@ -973,7 +888,10 @@ export async function handleMessage(
           }
 
         const proactiveResult = await brainHooks.executeToolPipeline(proactiveDecision, routeContext).catch(err => {
-          console.warn('[handler] Proactive onboarding tool call failed:', safeError(err))
+          logger.warn('[handler] Proactive onboarding tool call failed', {
+            userId: user.userId,
+            error: safeError(err),
+          })
           return null
         })
 
@@ -1051,12 +969,15 @@ export async function handleMessage(
         topicStrategy,
       })
     } catch (err) {
-      console.error('[handler] Personality composition failed, using static SOUL.md', safeError(err))
+      logger.error('[handler] Personality composition failed, using static SOUL.md', {
+        userId: user.userId,
+        error: safeError(err),
+      })
       systemPromptComposed = getRawSoulPrompt()
     }
 
     // Structured logging for debug
-    console.log('[handler] Prompt composed', {
+    logger.debug('[handler] Prompt composed', {
       complexity: classification.message_complexity,
       prefCount: Object.keys(preferences).length,
       memoryCount: memories.length,
@@ -1091,7 +1012,10 @@ export async function handleMessage(
     let estimatedTokens = estimateTokens(messages)
 
     if (estimatedTokens > MAX_PROMPT_TOKENS) {
-      console.warn(`[handler] Prompt too large (~${Math.round(estimatedTokens)} tokens). Truncating...`)
+      logger.warn('[handler] Prompt too large, truncating', {
+        estimatedTokens: Math.round(estimatedTokens),
+        budget: MAX_PROMPT_TOKENS,
+      })
 
       // Strategy 1: Truncate tool results in the system prompt (biggest offender)
       if (toolResultStr && toolResultStr.length > 800) {
@@ -1125,7 +1049,10 @@ export async function handleMessage(
         estimatedTokens = estimateTokens(messages)
       }
 
-      console.log(`[handler] After truncation: ~${Math.round(estimatedTokens)} tokens, history=${historyLimit}`)
+      logger.debug('[handler] Prompt truncated', {
+        estimatedTokens: Math.round(estimatedTokens),
+        historyLimit,
+      })
     }
 
     // ─── Step 11: Call Tier 2 (70B) + inline media fetch — truly concurrent ──
@@ -1183,7 +1110,10 @@ export async function handleMessage(
       ]),
     ])
 
-    console.log(`[handler] Tier 2 response from ${tier2Provider}${inlineMediaItem ? ` | inline media: ${inlineMediaItem.type}` : ''}`)
+    logger.debug('[handler] Tier 2 response received', {
+      provider: tier2Provider,
+      inlineMediaType: inlineMediaItem?.type ?? null,
+    })
 
     let rawResponse = tier2Response
 
@@ -1205,7 +1135,7 @@ export async function handleMessage(
       const questionLikeCount = countQuestionLikeSentences(generated)
       const severeStepDrift = generated.length > 560 || questionLikeCount > 1
       if (severeStepDrift) {
-        console.warn('[handler] Onboarding drift fallback applied', {
+        logger.warn('[handler] Onboarding drift fallback applied', {
           userId: user.userId,
           generatedLength: generated.length,
           questionLikeCount,
@@ -1216,7 +1146,7 @@ export async function handleMessage(
     }
 
     if (needsHumanReview(filterResult)) {
-      console.error('[SECURITY] Output filtered for review:', {
+      logger.error('[SECURITY] Output filtered for review', {
         userId: user.userId,
         reason: filterResult.reason,
         originalPreview: rawResponse.slice(0, 200),
@@ -1237,7 +1167,10 @@ export async function handleMessage(
     // bias the first real conversational turn after onboarding completes.
     if (onboardingActive && onboardingResult?.onboardingCompleted) {
       await clearSessionMessages(session.sessionId).catch(err => {
-        console.warn('[handler] Failed to clear onboarding session history:', safeError(err))
+        logger.warn('[handler] Failed to clear onboarding session history', {
+          sessionId: session.sessionId,
+          error: safeError(err),
+        })
       })
     }
 
@@ -1276,7 +1209,11 @@ export async function handleMessage(
             userMessage,
             classification,
           ).catch(err => {
-            console.error('[handler] Topic intent processing failed:', err)
+            logger.error('[handler] Topic intent processing failed', {
+              userId: user.userId,
+              sessionId: session.sessionId,
+              error: safeError(err),
+            })
           })
         }
 
@@ -1286,7 +1223,11 @@ export async function handleMessage(
           topicIntentService.completeTopic(user.userId, executingTopic.id)
             .then(() => logTopicCompleted(user.userId, executingTopic!.id, executingTopic!.topic))
             .catch(err => {
-              console.error('[handler] Topic completion failed:', err)
+              logger.error('[handler] Topic completion failed', {
+                userId: user.userId,
+                topicId: executingTopic.id,
+                error: safeError(err),
+              })
             })
         }
 
@@ -1297,7 +1238,10 @@ export async function handleMessage(
           previousMessageAt,
           classifierSignal: classification.userSignal,
         }).catch(err => {
-          console.error('[handler] Pulse scoring failed:', safeError(err))
+          logger.error('[handler] Pulse scoring failed', {
+            userId: user.userId,
+            error: safeError(err),
+          })
         })
 
         agendaPlanner.evaluate({
@@ -1312,7 +1256,11 @@ export async function handleMessage(
           activeToolName: routeDecision?.toolName ?? undefined,
           hasToolResult: !!toolResultStr,
         }).catch(err => {
-          console.error('[handler] Agenda planner evaluation failed:', safeError(err))
+          logger.error('[handler] Agenda planner evaluation failed', {
+            userId: user.userId,
+            sessionId: session.sessionId,
+            error: safeError(err),
+          })
         })
       })
     }
@@ -1389,10 +1337,14 @@ export async function handleMessage(
         : (toolExtractedMedia ?? fallbackMediaFromContext ?? venuePreviewMedia))
 
     // Diagnostic logging for media pipeline
-    console.log(`[handler] Media pipeline: toolName=${routeDecision.toolName} | inlineMediaItem=${!!inlineMediaItem} | toolExtracted=${toolExtractedMedia?.length ?? 0} | fallbackFromCtx=${fallbackMediaFromContext?.length ?? 0} | venuePreview=${venuePreviewMedia?.length ?? 0} | final=${resolvedMedia?.length ?? 0}`)
-    if (resolvedMedia?.length) {
-      console.log(`[handler] Media URLs: ${resolvedMedia.map(m => m.url?.substring(0, 80)).join(' | ')}`)
-    }
+    logger.debug('[handler] Media pipeline', {
+      toolName: routeDecision.toolName,
+      inlineMedia: Boolean(inlineMediaItem),
+      toolExtractedCount: toolExtractedMedia?.length ?? 0,
+      fallbackFromContextCount: fallbackMediaFromContext?.length ?? 0,
+      venuePreviewCount: venuePreviewMedia?.length ?? 0,
+      finalCount: resolvedMedia?.length ?? 0,
+    })
 
     return {
       text: assistantResponse,
@@ -1405,7 +1357,11 @@ export async function handleMessage(
     }
 
   } catch (error) {
-    console.error('[ERROR] Message handling failed:', safeError(error))
+    logger.error('[ERROR] Message handling failed', {
+      channel,
+      channelUserId,
+      error: safeError(error),
+    })
     return { text: "Oops, something went wrong on my end! Mind trying that again? 😅" }
   }
 }
@@ -1483,7 +1439,10 @@ async function handleFriendCommand(
 
     return '👥 **Friend Commands:**\n`/friend` — list friends\n`/friend add <username>` — add friend\n`/friend remove <username>` — remove friend\n`/friend accept <username>` — accept request'
   } catch (error) {
-    console.error('[handler] Friend command failed:', safeError(error))
+    logger.error('[handler] Friend command failed', {
+      userId,
+      error: safeError(error),
+    })
     return "Something went wrong with the friend command. Please try again!"
   }
 }
@@ -1564,7 +1523,10 @@ async function handleSquadCommand(
 
     return '👥 **Squad Commands:**\n`/squad` — list squads\n`/squad create <name>` — create squad\n`/squad invite <squad> <user>` — invite member\n`/squad join <name>` — accept invite\n`/squad leave <name>` — leave squad'
   } catch (error) {
-    console.error('[handler] Squad command failed:', safeError(error))
+    logger.error('[handler] Squad command failed', {
+      userId,
+      error: safeError(error),
+    })
     return "Something went wrong with the squad command. Please try again!"
   }
 }
@@ -1593,7 +1555,11 @@ async function handleLinkCommand(
     }
     return result.message
   } catch (error) {
-    console.error('[handler] Link command failed:', safeError(error))
+    logger.error('[handler] Link command failed', {
+      channel,
+      channelUserId,
+      error: safeError(error),
+    })
     return "Something went wrong with the link command. Please try again!"
   }
 }

@@ -35,41 +35,72 @@ function isMapPreviewUrl(url: string): boolean {
   return /maps\.googleapis\.com\/maps\/api\/staticmap/i.test(url)
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function asRecordArray(value: unknown): Record<string, unknown>[] | null {
+  if (!Array.isArray(value)) return null
+
+  const records = value
+    .map(item => asRecord(item))
+    .filter((item): item is Record<string, unknown> => item !== null)
+
+  return records.length > 0 ? records : null
+}
+
+function getString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key]
+  return typeof value === 'string' ? value : undefined
+}
+
+function getNumber(record: Record<string, unknown>, key: string): number | undefined {
+  const value = record[key]
+  return typeof value === 'number' ? value : undefined
+}
+
 export function extractMediaFromToolResult(
   toolName: string | null | undefined,
   rawData: unknown,
 ): ResponseMedia[] | undefined {
   if (normalizeToolName(toolName) !== 'search_places') return undefined
-  if (!rawData || typeof rawData !== 'object') return undefined
+  const data = asRecord(rawData)
+  if (!data) return undefined
 
-  const data = rawData as any
-
-  if (Array.isArray(data?.images)) {
-    const media = data.images
-      .filter((img: any) => typeof img?.url === 'string' && !isMapPreviewUrl(img.url))
+  const imageRecords = asRecordArray(data.images)
+  if (imageRecords) {
+    const media = imageRecords
+      .filter(img => {
+        const url = getString(img, 'url')
+        return typeof url === 'string' && !isMapPreviewUrl(url)
+      })
       .slice(0, 6)
-      .map((img: any) => ({
+      .map(img => ({
         type: 'photo' as const,
-        url: img.url,
-        caption: img.caption,
+        url: getString(img, 'url') ?? '',
+        caption: getString(img, 'caption'),
       }))
     if (media.length > 0) return media
   }
 
-  const results = data?.raw ?? data
-  if (!Array.isArray(results)) return undefined
+  const results = asRecordArray(data.raw) ?? asRecordArray(rawData)
+  if (!results) return undefined
 
   const media: ResponseMedia[] = []
 
   for (const result of results) {
-    if (!Array.isArray(result?.items)) continue
-    for (const item of result.items) {
-      if (typeof item?.imageUrl !== 'string' || media.length >= 5) continue
-      const badge = item.isBestseller ? ' ⭐ BESTSELLER' : ''
+    const items = asRecordArray(result.items)
+    if (!items) continue
+    for (const item of items) {
+      const imageUrl = getString(item, 'imageUrl')
+      if (typeof imageUrl !== 'string' || media.length >= 5) continue
+      const badge = item.isBestseller === true ? ' ⭐ BESTSELLER' : ''
       media.push({
         type: 'photo',
-        url: item.imageUrl,
-        caption: `${item.name} — ₹${item.price}${badge}\n📍 ${result.restaurant} (${result.platform})`,
+        url: imageUrl,
+        caption: `${getString(item, 'name') ?? 'Item'} — ₹${String(item.price ?? '?')}${badge}\n📍 ${getString(result, 'restaurant') ?? 'Unknown place'} (${getString(result, 'platform') ?? 'Unknown'})`,
       })
     }
   }
@@ -81,21 +112,22 @@ export function extractVenuesFromToolResult(
   toolName: string | null | undefined,
   rawData: unknown,
 ): ResponseVenue[] | undefined {
-  if (!rawData || typeof rawData !== 'object') return undefined
-
   const normalizedTool = normalizeToolName(toolName)
-  const data = rawData as any
+  const data = asRecord(rawData)
+  if (!data) return undefined
 
   if (normalizedTool === 'search_places') {
-    const places = data?.raw ?? data
-    if (!Array.isArray(places)) return undefined
+    const places = asRecordArray(data.raw) ?? asRecordArray(rawData)
+    if (!places) return undefined
 
     const venues: ResponseVenue[] = []
     for (const place of places.slice(0, 3)) {
-      const name = place.displayName?.text || place.name
-      const address = place.formattedAddress || place.address || ''
-      const lat = place.location?.latitude ?? place.location?.lat
-      const lng = place.location?.longitude ?? place.location?.lng
+      const displayName = asRecord(place.displayName)
+      const location = asRecord(place.location)
+      const name = getString(displayName ?? {}, 'text') ?? getString(place, 'name')
+      const address = getString(place, 'formattedAddress') ?? getString(place, 'address') ?? ''
+      const lat = getNumber(location ?? {}, 'latitude') ?? getNumber(location ?? {}, 'lat')
+      const lng = getNumber(location ?? {}, 'longitude') ?? getNumber(location ?? {}, 'lng')
       if (name && typeof lat === 'number' && typeof lng === 'number') {
         venues.push({ name, address, lat, lng })
       }
@@ -104,15 +136,19 @@ export function extractVenuesFromToolResult(
   }
 
   if (normalizedTool === 'get_directions') {
-    const routes = data?.raw?.routes ?? data?.routes
-    if (!Array.isArray(routes) || routes.length === 0) return undefined
-    const leg = routes[0]?.legs?.[routes[0]?.legs?.length - 1]
-    if (!leg?.end_location) return undefined
+    const raw = asRecord(data.raw)
+    const routes = asRecordArray(raw?.routes) ?? asRecordArray(data.routes)
+    if (!routes || routes.length === 0) return undefined
+    const firstRoute = routes[0]
+    const legs = asRecordArray(firstRoute.legs)
+    const leg = legs?.[legs.length - 1]
+    const endLocation = leg ? asRecord(leg.end_location) : null
+    if (!leg || !endLocation) return undefined
     return [{
-      name: leg.end_address?.split(',')[0] || 'Destination',
-      address: leg.end_address || '',
-      lat: leg.end_location.lat,
-      lng: leg.end_location.lng,
+      name: getString(leg, 'end_address')?.split(',')[0] || 'Destination',
+      address: getString(leg, 'end_address') ?? '',
+      lat: getNumber(endLocation, 'lat') ?? 0,
+      lng: getNumber(endLocation, 'lng') ?? 0,
     }]
   }
 

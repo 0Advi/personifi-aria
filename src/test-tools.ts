@@ -29,24 +29,28 @@ const CHECK = `${GREEN}✅${RESET}`
 const CROSS = `${RED}❌${RESET}`
 const WARN = `${YELLOW}⚠️${RESET}`
 
-function log(icon: string, msg: string) { console.log(`  ${icon}  ${msg}`) }
+function print(line: string = ''): void {
+    process.stdout.write(`${line}\n`)
+}
+
+function log(icon: string, msg: string) { print(`  ${icon}  ${msg}`) }
 
 // ─── Tool tests ──────────────────────────────────────────────────────────────
 
 interface ToolTest {
     name: string
-    fn: () => Promise<any>
+    fn: () => Promise<unknown>
     needsKey?: string // env var name — if missing we expect graceful error
     isScraper?: boolean // scraper tools need longer timeout (45s vs 15s)
 }
 
 async function runToolTests(): Promise<{ passed: number; failed: number; skipped: number }> {
-    console.log('')
-    console.log(`  ${BOLD}${CYAN}═══════════════════════════════════════════════════════${RESET}`)
-    console.log(`  ${BOLD}🔧 Tool Smoke Tests (20 tools)${RESET}`)
-    console.log(`  ${BOLD}${CYAN}═══════════════════════════════════════════════════════${RESET}`)
-    console.log(`  ${DIM}Each tool is called with minimal params — checking import, invocation, and graceful error handling.${RESET}`)
-    console.log('')
+    print('')
+    print(`  ${BOLD}${CYAN}═══════════════════════════════════════════════════════${RESET}`)
+    print(`  ${BOLD}🔧 Tool Smoke Tests (20 tools)${RESET}`)
+    print(`  ${BOLD}${CYAN}═══════════════════════════════════════════════════════${RESET}`)
+    print(`  ${DIM}Each tool is called with minimal params — checking import, invocation, and graceful error handling.${RESET}`)
+    print('')
 
     const tests: ToolTest[] = [
         {
@@ -223,7 +227,8 @@ async function runToolTests(): Promise<{ passed: number; failed: number; skipped
             ])
 
             if (result && typeof result === 'object' && 'success' in result) {
-                if (result.success) {
+                const toolResult = result as { success: unknown; error?: unknown }
+                if (toolResult.success) {
                     log(CHECK, `${label} ${GREEN}OK${RESET} (data returned)`)
                     passed++
                 } else if (keyMissing) {
@@ -231,7 +236,7 @@ async function runToolTests(): Promise<{ passed: number; failed: number; skipped
                     log(WARN, `${label} ${YELLOW}GRACEFUL FAIL${RESET} — API key not set (${test.needsKey})`)
                     passed++ // graceful error is correct behavior
                 } else {
-                    log(WARN, `${label} ${YELLOW}RETURNED ERROR${RESET}: ${result.error || 'unknown'}`)
+                    log(WARN, `${label} ${YELLOW}RETURNED ERROR${RESET}: ${String(toolResult.error ?? 'unknown')}`)
                     // Some tools fail at runtime without MCP tokens etc — this is expected
                     skipped++
                 }
@@ -239,21 +244,22 @@ async function runToolTests(): Promise<{ passed: number; failed: number; skipped
                 log(CHECK, `${label} ${GREEN}OK${RESET} (callable, returned ${typeof result})`)
                 passed++
             }
-        } catch (err: any) {
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
             if (keyMissing) {
                 log(WARN, `${label} ${YELLOW}NO KEY${RESET} — ${test.needsKey} not set`)
                 skipped++
             } else {
-                log(CROSS, `${label} ${RED}CRASHED${RESET}: ${err.message?.slice(0, 100)}`)
+                log(CROSS, `${label} ${RED}CRASHED${RESET}: ${message.slice(0, 100)}`)
                 failed++
             }
         }
     }
 
-    console.log('')
-    console.log(`  ${BOLD}━━━ Tool Results ━━━${RESET}`)
-    console.log(`  ${GREEN}Passed: ${passed}${RESET}  ${RED}Failed: ${failed}${RESET}  ${YELLOW}Skipped: ${skipped}${RESET}`)
-    console.log('')
+    print('')
+    print(`  ${BOLD}━━━ Tool Results ━━━${RESET}`)
+    print(`  ${GREEN}Passed: ${passed}${RESET}  ${RED}Failed: ${failed}${RESET}  ${YELLOW}Skipped: ${skipped}${RESET}`)
+    print('')
 
     return { passed, failed, skipped }
 }
@@ -266,12 +272,12 @@ interface AgentTest {
 }
 
 async function runAgentTests(): Promise<{ passed: number; failed: number }> {
-    console.log('')
-    console.log(`  ${BOLD}${CYAN}═══════════════════════════════════════════════════════${RESET}`)
-    console.log(`  ${BOLD}🤖 Subagent Module Health Check${RESET}`)
-    console.log(`  ${BOLD}${CYAN}═══════════════════════════════════════════════════════${RESET}`)
-    console.log(`  ${DIM}Verifying all subagent modules import cleanly and core functions are callable.${RESET}`)
-    console.log('')
+    print('')
+    print(`  ${BOLD}${CYAN}═══════════════════════════════════════════════════════${RESET}`)
+    print(`  ${BOLD}🤖 Subagent Module Health Check${RESET}`)
+    print(`  ${BOLD}${CYAN}═══════════════════════════════════════════════════════${RESET}`)
+    print(`  ${DIM}Verifying all subagent modules import cleanly and core functions are callable.${RESET}`)
+    print('')
 
     const tests: AgentTest[] = [
         {
@@ -460,16 +466,17 @@ async function runAgentTests(): Promise<{ passed: number; failed: number }> {
             const status = await test.fn()
             log(CHECK, `${label} — ${DIM}${status}${RESET}`)
             passed++
-        } catch (err: any) {
-            log(CROSS, `${label} — ${RED}${err.message?.slice(0, 120)}${RESET}`)
+        } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            log(CROSS, `${label} — ${RED}${message.slice(0, 120)}${RESET}`)
             failed++
         }
     }
 
-    console.log('')
-    console.log(`  ${BOLD}━━━ Agent Results ━━━${RESET}`)
-    console.log(`  ${GREEN}Passed: ${passed}${RESET}  ${RED}Failed: ${failed}${RESET}`)
-    console.log('')
+    print('')
+    print(`  ${BOLD}━━━ Agent Results ━━━${RESET}`)
+    print(`  ${GREEN}Passed: ${passed}${RESET}  ${RED}Failed: ${failed}${RESET}`)
+    print('')
 
     return { passed, failed }
 }
@@ -495,17 +502,17 @@ const mode = process.argv[2] || 'all'
         const totalFailed = toolResults.failed + agentResults.failed
         const totalSkipped = toolResults.skipped
 
-        console.log(`  ${BOLD}${CYAN}═══════════════════════════════════════════════════════${RESET}`)
-        console.log(`  ${BOLD}📊 Final Summary${RESET} (${elapsed}s)`)
-        console.log(`  ${GREEN}Passed: ${totalPassed}${RESET}  ${RED}Failed: ${totalFailed}${RESET}  ${YELLOW}Skipped: ${totalSkipped}${RESET}`)
+        print(`  ${BOLD}${CYAN}═══════════════════════════════════════════════════════${RESET}`)
+        print(`  ${BOLD}📊 Final Summary${RESET} (${elapsed}s)`)
+        print(`  ${GREEN}Passed: ${totalPassed}${RESET}  ${RED}Failed: ${totalFailed}${RESET}  ${YELLOW}Skipped: ${totalSkipped}${RESET}`)
 
         if (totalFailed > 0) {
-            console.log(`  ${RED}${BOLD}⚠️  Some checks failed — review errors above${RESET}`)
+            print(`  ${RED}${BOLD}⚠️  Some checks failed — review errors above${RESET}`)
         } else {
-            console.log(`  ${GREEN}${BOLD}🎉 All checks passed!${RESET}`)
+            print(`  ${GREEN}${BOLD}🎉 All checks passed!${RESET}`)
         }
-        console.log(`  ${BOLD}${CYAN}═══════════════════════════════════════════════════════${RESET}`)
-        console.log('')
+        print(`  ${BOLD}${CYAN}═══════════════════════════════════════════════════════${RESET}`)
+        print('')
 
         process.exit(totalFailed > 0 ? 1 : 0)
     })()

@@ -13,12 +13,14 @@
 
 import Groq from 'groq-sdk'
 import { withGroqRetry } from '../utils/retry.js'
+import type { ToolCall, ToolChoice, ToolDefinition } from './tool-contracts.js'
+import { logger } from '../utils/logger.js'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface ProviderCallResult {
     text: string;
-    toolCalls?: any[];
+    toolCalls?: ToolCall[];
 }
 
 export interface LLMProvider {
@@ -32,7 +34,7 @@ export interface LLMProvider {
 export interface ChatMessage {
     role: 'system' | 'user' | 'assistant' | 'tool'
     content: string
-    tool_calls?: any[]
+    tool_calls?: ToolCall[]
     tool_call_id?: string
 }
 
@@ -40,14 +42,68 @@ export interface CallOptions {
     maxTokens?: number
     temperature?: number
     jsonMode?: boolean
-    tools?: any[]
-    toolChoice?: 'auto' | 'none'
+    tools?: ToolDefinition[]
+    toolChoice?: ToolChoice
 }
 
 export interface ProviderResult {
     text: string
     provider: string
-    toolCalls?: any[]
+    toolCalls?: ToolCall[]
+}
+
+interface GeminiFunctionCall {
+    name?: string
+    args?: Record<string, unknown>
+}
+
+interface GeminiPart {
+    text?: string
+    functionCall?: GeminiFunctionCall
+}
+
+interface GeminiCandidate {
+    content?: {
+        parts?: GeminiPart[]
+    }
+}
+
+interface GeminiResponseBody {
+    candidates?: GeminiCandidate[]
+}
+
+interface GeminiRequestBody {
+    contents: Array<{
+        role: 'user' | 'model'
+        parts: Array<{ text: string }>
+    }>
+    generationConfig: {
+        maxOutputTokens: number
+        temperature: number
+        responseMimeType?: 'application/json'
+    }
+    systemInstruction?: {
+        parts: Array<{ text: string }>
+    }
+}
+
+interface GroqCompletionParams {
+    model: string
+    messages: Groq.Chat.ChatCompletionMessageParam[]
+    max_tokens: number
+    temperature: number
+    response_format?: { type: 'json_object' }
+    tools?: Groq.Chat.ChatCompletionTool[]
+    tool_choice?: Groq.Chat.ChatCompletionToolChoiceOption
+}
+
+interface ProviderError extends Error {
+    status?: number
+    error?: {
+        error?: {
+            code?: number
+        }
+    }
 }
 
 // ─── Media URL Stripping ────────────────────────────────────────────────────
@@ -84,14 +140,9 @@ function makeGroqProvider(model: string, label: string): LLMProvider {
         name: label,
         call: async (messages, opts) => {
             const client = getGroq()
-            const params: any = {
+            const params: GroqCompletionParams = {
                 model,
-                messages: messages.map(m => ({
-                    role: m.role,
-                    content: m.content,
-                    ...(m.tool_calls ? { tool_calls: m.tool_calls } : {}),
-                    ...(m.tool_call_id ? { tool_call_id: m.tool_call_id } : {}),
-                })),
+                messages: messages.map(toGroqMessage),
                 max_tokens: opts.maxTokens ?? 500,
                 temperature: opts.temperature ?? 0.8,
             }
@@ -99,17 +150,17 @@ function makeGroqProvider(model: string, label: string): LLMProvider {
                 params.response_format = { type: 'json_object' }
             }
             if (opts.tools?.length) {
-                params.tools = opts.tools
+                params.tools = opts.tools as unknown as Groq.Chat.ChatCompletionTool[]
                 params.tool_choice = opts.toolChoice ?? 'auto'
             }
             const completion = await withGroqRetry(
                 () => client.chat.completions.create(params),
                 `groq-${model.includes('70b') || model.includes('70B') ? '70b' : '8b'}`,
             )
-            const message = completion.choices[0]?.message;
+            const message = completion.choices[0]?.message
             return {
                 text: message?.content || '',
-                toolCalls: message?.tool_calls
+                toolCalls: message?.tool_calls as ToolCall[] | undefined,
             }
         },
     }
@@ -125,12 +176,12 @@ function makeGeminiProvider(model: string, label: string): LLMProvider {
             // Convert chat messages to Gemini format
             const systemMsg = messages.find(m => m.role === 'system')
             const nonSystem = messages.filter(m => m.role !== 'system')
-            const contents = nonSystem.map(m => ({
+            const contents: GeminiRequestBody['contents'] = nonSystem.map(m => ({
                 role: m.role === 'assistant' ? 'model' : 'user',
                 parts: [{ text: m.content }],
             }))
 
-            const body: any = {
+            const body: GeminiRequestBody = {
                 contents,
                 generationConfig: {
                     maxOutputTokens: opts.maxTokens ?? 500,
@@ -154,20 +205,25 @@ function makeGeminiProvider(model: string, label: string): LLMProvider {
             if (!resp.ok) {
                 const err = await resp.text().catch(() => '')
                 const status = resp.status
-                const error: any = new Error(`Gemini ${status}: ${err}`)
+                const error = new Error(`Gemini ${status}: ${err}`) as ProviderError
                 error.status = status
                 throw error
             }
 
-            const data = await resp.json()
-            const fnCalls = data.candidates?.[0]?.content?.parts?.filter((p: any) => p.functionCall).map((p: any) => ({
-                id: 'call_' + Math.random().toString(36).substr(2, 9),
-                type: 'function',
-                function: { name: p.functionCall.name, arguments: JSON.stringify(p.functionCall.args) }
-            }));
+            const data: GeminiResponseBody = await resp.json()
+            const fnCalls: ToolCall[] | undefined = data.candidates?.[0]?.content?.parts
+                ?.filter(part => part.functionCall?.name)
+                .map(part => ({
+                id: 'call_' + Math.random().toString(36).slice(2, 11),
+                type: 'function' as const,
+                function: {
+                    name: part.functionCall?.name ?? 'unknown_tool',
+                    arguments: JSON.stringify(part.functionCall?.args ?? {}),
+                },
+            }))
             return {
                 text: data.candidates?.[0]?.content?.parts?.[0]?.text || '',
-                toolCalls: fnCalls?.length ? fnCalls : undefined
+                toolCalls: fnCalls?.length ? fnCalls : undefined,
             }
         },
     }
@@ -202,10 +258,15 @@ async function callWithFallback(
 
         for (let attempt = 0; attempt < BACKOFF_DELAYS.length; attempt++) {
             try {
-                console.log(`[LLM] Using ${provider.name} (${tier})`)
+                logger.debug('[LLM] Calling provider', {
+                    provider: provider.name,
+                    tier,
+                    attempt: attempt + 1,
+                })
                 const res = await provider.call(messages, opts)
                 return { text: res.text, toolCalls: res.toolCalls, provider: provider.name }
-            } catch (err: any) {
+            } catch (error) {
+                const err = error as ProviderError
                 const is429 = err?.status === 429
                     || err?.error?.error?.code === 429
                     || String(err?.message).includes('429')
@@ -214,35 +275,78 @@ async function callWithFallback(
                 if (is429) {
                     if (attempt < BACKOFF_DELAYS.length - 1) {
                         const delay = BACKOFF_DELAYS[attempt]
-                        console.warn(`[LLM] ${provider.name} rate-limited, retrying in ${delay}ms (attempt ${attempt + 1})`)
+                        logger.warn('[LLM] Provider rate limited, retrying', {
+                            provider: provider.name,
+                            tier,
+                            delay,
+                            attempt: attempt + 1,
+                        })
                         await sleep(delay)
                         continue
                     }
                     // Exhausted retries for this provider → fallback to next
-                    console.warn(`[LLM] ${provider.name} exhausted, falling back to next provider`)
+                    logger.warn('[LLM] Provider exhausted after rate limits, falling back', {
+                        provider: provider.name,
+                        tier,
+                    })
                     break
                 }
 
                 // Non-429 error — retry once, then move on
                 if (attempt === 0) {
-                    console.warn(`[LLM] ${provider.name} error: ${err?.message}, retrying once`)
+                    logger.warn('[LLM] Provider call failed, retrying once', {
+                        provider: provider.name,
+                        tier,
+                        message: err?.message,
+                    })
                     await sleep(BACKOFF_DELAYS[0])
                     continue
                 }
 
-                console.error(`[LLM] ${provider.name} failed permanently:`, err?.message)
+                logger.error('[LLM] Provider failed permanently', {
+                    provider: provider.name,
+                    tier,
+                    message: err?.message,
+                })
                 break
             }
         }
     }
 
     // All providers exhausted
-    console.error(`[LLM] All ${tier} providers exhausted`)
+    logger.error('[LLM] All providers exhausted', { tier })
     return { text: '', provider: 'none' }
 }
 
 function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function toGroqMessage(message: ChatMessage): Groq.Chat.ChatCompletionMessageParam {
+    switch (message.role) {
+        case 'system':
+            return {
+                role: 'system',
+                content: message.content,
+            }
+        case 'user':
+            return {
+                role: 'user',
+                content: message.content,
+            }
+        case 'assistant':
+            return {
+                role: 'assistant',
+                content: message.content,
+                ...(message.tool_calls ? { tool_calls: message.tool_calls as unknown as Groq.Chat.ChatCompletionMessageToolCall[] } : {}),
+            }
+        case 'tool':
+            return {
+                role: 'tool',
+                content: message.content,
+                tool_call_id: message.tool_call_id ?? '',
+            }
+    }
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────

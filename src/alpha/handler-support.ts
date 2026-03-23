@@ -6,6 +6,8 @@ import { topicIntentService } from '../topic-intent/index.js'
 import { appendMessages, getPool, trackUsage, trimSessionHistory } from '../character/session-store.js'
 import { countTokens, type AlphaContextBundle } from './context-manager.js'
 import type { TopicIntent } from '../topic-intent/types.js'
+import type { EngagementState } from '../pulse/types.js'
+import type { ClassifierResult } from '../types/cognitive.js'
 
 export interface AlphaSignals {
   currentDirection: string | null
@@ -43,7 +45,7 @@ export function buildAlphaUserContext(
 }
 
 export function buildPulseTopicContext(
-  pulseState: string,
+  pulseState: EngagementState,
   activeTopics: TopicIntent[],
 ): string {
   const lines = [`Pulse: ${pulseState}`]
@@ -84,7 +86,7 @@ export function buildTopicIntentClassifierResult(
   userMessage: string,
   signals: AlphaSignals,
   toolName: string | null,
-): Record<string, unknown> {
+) : ClassifierResult {
   const wordCount = userMessage.trim().split(/\s+/).filter(Boolean).length
   const messageComplexity = wordCount <= 4 ? 'simple' : 'moderate'
 
@@ -121,7 +123,7 @@ export function buildBackgroundOperations(input: {
   extractedIntents: string[]
   engagementSignal: 'positive' | 'negative' | 'neutral'
   fusionInvalidated: string[]
-  classifierResult: Record<string, unknown>
+  classifierResult: ClassifierResult
   executingTopic: TopicIntent | null
   hasToolExecution: boolean
   writeSignalPacketFallback: boolean
@@ -175,7 +177,7 @@ export function buildBackgroundOperations(input: {
         input.userId,
         input.sessionId,
         input.userMessage,
-        input.classifierResult as any,
+        input.classifierResult,
       ),
     },
   ]

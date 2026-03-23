@@ -8,6 +8,7 @@ import {
 import { handleMessageAlpha } from './handler-alpha.js';
 
 import type { HandleMessageOptions } from './handler-legacy.js';
+import { logger } from '../utils/logger.js';
 
 // Feature flag: set in .env
 // ALPHA_HANDLER_ENABLED=true  → use new 5-step pipeline
@@ -25,7 +26,7 @@ export async function handleMessage(
     const abMode = process.env.ALPHA_AB_MODE === 'true'
 
     if (abMode) {
-        console.log('[Handler] A/B mode: running BOTH handlers')
+        logger.debug('[Handler] Running A/B comparison', { channel, channelUserId })
         const start = Date.now()
         const [legacyResult, alphaResult] = await Promise.all([
             handleMessageLegacy(channel, channelUserId, rawMessage, options)
@@ -35,17 +36,19 @@ export async function handleMessage(
         ])
         const elapsedMs = Date.now() - start
 
-        console.log(`[Handler/AB] Completed in ${elapsedMs}ms`)
-        console.log(`[Handler/AB] Legacy response: ${legacyResult.text.slice(0, 120)}`)
-        console.log(`[Handler/AB] Alpha  response: ${alphaResult.text.slice(0, 120)}`)
+        logger.debug('[Handler/AB] Completed', {
+            elapsedMs,
+            legacyChars: legacyResult.text.length,
+            alphaChars: alphaResult.text.length,
+        })
         return alphaResult
     }
 
     if (useAlpha) {
-        console.log('[Handler] Using alpha handler')
+        logger.debug('[Handler] Using alpha handler', { channel, channelUserId })
         return handleMessageAlpha(channel, channelUserId, rawMessage, options)
     }
-    console.log('[Handler] Using legacy handler')
+    logger.debug('[Handler] Using legacy handler', { channel, channelUserId })
     return handleMessageLegacy(channel, channelUserId, rawMessage, options)
 }
 

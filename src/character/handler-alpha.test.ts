@@ -127,6 +127,7 @@ vi.mock('../db/fusion-tables.js', () => ({
 }))
 
 import { handleMessageAlpha } from './handler-alpha.js'
+import type { GatheredContext } from '../alpha/context-manager.js'
 
 describe('handleMessageAlpha', () => {
   beforeEach(() => {
@@ -158,7 +159,7 @@ describe('handleMessageAlpha', () => {
     getActiveTopicsMock.mockResolvedValue([])
     processMessageMock.mockResolvedValue({})
     completeTopicMock.mockResolvedValue(undefined)
-    buildContextMock.mockImplementation((soul: string, gathered: any, proactiveState: string) => ({
+    buildContextMock.mockImplementation((soul: string, gathered: GatheredContext, proactiveState: string) => ({
       soul,
       userContext: gathered.userContext,
       pulseTopics: gathered.pulseTopics,

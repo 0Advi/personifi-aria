@@ -14,6 +14,9 @@ import { acceptSquadInvite } from '../social/squad.js'
 import { handleOnboarding } from '../onboarding/onboarding-flow.js'
 import { handleBridgePingCallback, suggestFriendOpinion } from '../social/outbound-worker.js'
 import { getOrCreateUser } from './session-store.js'
+import { logger } from '../utils/logger.js'
+
+type InlineChoice = { text: string; callback_data: string }
 
 // What each button tap means as a message Aria receives
 const CALLBACK_INTENTS: Record<string, string> = {
@@ -84,11 +87,15 @@ export async function handleCallbackAction(
         )
         return {
           text: generated.text,
-          choices: (generated._buttons ?? result.buttons)?.flat().map((b: any) => ({ label: b.text, action: b.callback_data })),
+          choices: (generated._buttons ?? result.buttons)
+            ?.flat()
+            .map((button: InlineChoice) => ({ label: button.text, action: button.callback_data })),
         }
       }
     } catch (err) {
-      console.warn('[CallbackHandler] Onboarding callback failed:', (err as Error).message)
+      logger.warn('[CallbackHandler] Onboarding callback failed', {
+        message: (err as Error).message,
+      })
     }
     return null
   }

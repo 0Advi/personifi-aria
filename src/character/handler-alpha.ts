@@ -28,6 +28,7 @@ import { fusionReactiveDecision } from '../fusion/reactive.js'
 import { safeError } from '../utils/safe-log.js'
 import { extractResponseArtifacts } from './response-artifacts.js'
 import type { MessageResponse, HandleMessageOptions } from './handler-legacy.js'
+import { logger } from '../utils/logger.js'
 
 export async function handleMessageAlpha(
   channel: string,
@@ -53,7 +54,13 @@ export async function handleMessageAlpha(
 
     let onboardingResult = options.onboardingResult ?? null
     if (!options.bypassOnboarding && !user.authenticated) {
-      onboardingResult = await handleOnboarding(user.userId, userMessage).catch(console.error) || null
+      onboardingResult = await handleOnboarding(user.userId, userMessage).catch(err => {
+        logger.error('[HandlerAlpha] Onboarding flow failed', {
+          userId: user.userId,
+          error: safeError(err),
+        })
+        return null
+      })
     }
     const onboardingActive = !!onboardingResult?.handled
 
@@ -100,7 +107,7 @@ export async function handleMessageAlpha(
           preferences: preferences as Record<string, string>,
           graphNeighbors: graphContext as unknown[],
         },
-        pulseState: pulseState as any,
+        pulseState,
         pulseScore: 0,
       })
       signalPacketWrittenByFusion = true
@@ -116,10 +123,16 @@ export async function handleMessageAlpha(
         }
       }
       if (fusionInvalidated.length > 0) {
-        console.log(`[HandlerAlpha] Invalidated stale ProactiveState: ${fusionInvalidated.join(', ')}`)
+        logger.debug('[HandlerAlpha] Invalidated proactive stimuli', {
+          userId: user.userId,
+          invalidated: fusionInvalidated,
+        })
       }
     } catch (err) {
-      console.error('[HandlerAlpha] Fusion reactive decision failed (non-fatal):', safeError(err))
+      logger.error('[HandlerAlpha] Fusion reactive decision failed', {
+        userId: user.userId,
+        error: safeError(err),
+      })
     }
 
     const soul = getAlphaSoulPrompt()
@@ -170,9 +183,13 @@ export async function handleMessageAlpha(
       user.homeLocation,
     )
 
-    console.log(
-      `[HandlerAlpha] Pipeline: ${alphaMs}ms | LLM calls: ${llmCalls} | Tools: ${alphaResult.toolCalls.map(t => t.name).join(',') || 'none'} | Prefetch: ${prefetchedToolResult ? 'hit' : 'miss'}`,
-    )
+    logger.debug('[HandlerAlpha] Pipeline completed', {
+      userId: user.userId,
+      latencyMs: alphaMs,
+      llmCalls,
+      tools: alphaResult.toolCalls.map(t => t.name),
+      prefetched: Boolean(prefetchedToolResult),
+    })
 
     const previousUserMessage = [...session.messages]
       .reverse()
@@ -211,7 +228,11 @@ export async function handleMessageAlpha(
       void Promise.allSettled(backgroundOps.map(op => op.run())).then(results => {
         results.forEach((result, index) => {
           if (result.status === 'rejected') {
-            console.error(`[HandlerAlpha] Background op failed: ${backgroundOps[index].label}`, safeError(result.reason))
+            logger.error('[HandlerAlpha] Background operation failed', {
+              userId: user.userId,
+              label: backgroundOps[index].label,
+              error: safeError(result.reason),
+            })
           }
         })
       })
@@ -225,7 +246,11 @@ export async function handleMessageAlpha(
       ...(onboardingActive && onboardingResult?.buttons ? { _buttons: onboardingResult.buttons } : {}),
     }
   } catch (err) {
-    console.error('[ERROR] Alpha Message handling failed:', safeError(err))
+    logger.error('[HandlerAlpha] Message handling failed', {
+      channel,
+      channelUserId,
+      error: safeError(err),
+    })
     return { text: "Oops, something went wrong on my end! Mind trying that again? 😅" }
   }
 }

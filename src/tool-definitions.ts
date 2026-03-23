@@ -1,15 +1,6 @@
-export interface AlphaToolDefinition {
-    type: 'function'
-    function: {
-        name: string
-        description: string
-        parameters: {
-            type: 'object'
-            properties: Record<string, any>
-            required?: string[]
-        }
-    }
-}
+import type { ToolDefinition } from './llm/tool-contracts.js'
+
+export type AlphaToolDefinition = ToolDefinition
 
 export const ALPHA_TOOL_DEFINITIONS: AlphaToolDefinition[] = [
     {

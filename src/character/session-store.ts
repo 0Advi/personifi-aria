@@ -4,6 +4,7 @@
  */
 
 import { Pool, PoolClient } from 'pg'
+import { logger } from '../utils/logger.js'
 
 // Types
 export interface User {
@@ -372,7 +373,7 @@ export async function runMigrations(): Promise<void> {
     END $$
   `)
 
-  console.log('[DB] Migrations complete')
+  logger.info('[DB] Migrations complete')
 }
 
 /**

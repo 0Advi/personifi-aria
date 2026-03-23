@@ -1,4 +1,5 @@
 import { ChatMessage } from '../llm/tierManager.js'
+import { logger } from '../utils/logger.js'
 
 export const MAX_TOKENS = 8192
 export const WARN_TOKENS = Math.floor(MAX_TOKENS * 0.8)
@@ -48,12 +49,17 @@ export function compressToolResults(results: string, maxTokens: number = MAX_TOO
 
     const maxChars = maxTokens * 4
     const nameStr = toolName ? ` (${toolName})` : ''
-    console.log(`[Alpha/Context] Tool result compressed: ${currentTokens} → ${maxTokens} tokens${nameStr}`)
+    logger.debug('[Alpha/Context] Tool result compressed', {
+        fromTokens: currentTokens,
+        toTokens: maxTokens,
+        toolName: toolName ?? null,
+        label: nameStr || null,
+    })
 
     try {
         const parsed = JSON.parse(sanitized)
         if (Array.isArray(parsed)) {
-            const truncated: any[] = []
+            const truncated: unknown[] = []
             for (const item of parsed) {
                 truncated.push(item)
                 if (countTokens(JSON.stringify(truncated)) > maxTokens) {
@@ -160,7 +166,10 @@ export function buildContext(
         const tightenedHistory = keepRecentMessages(finalHistory, 4)
         const tightenedTokens = tightenedHistory.reduce((acc, msg) => acc + countTokens(msg.content), 0)
         if (tightenedTokens < thistory) {
-            console.log(`[Alpha/Context] Tight budget: trimming history window (${thistory} → ${tightenedTokens} tokens)`)
+            logger.debug('[Alpha/Context] Tight budget: trimming history window', {
+                fromTokens: thistory,
+                toTokens: tightenedTokens,
+            })
             finalHistory = tightenedHistory
             thistory = tightenedTokens
             total = tsoul + tuser + tproact + tpulse + thistory + ttools
@@ -171,7 +180,10 @@ export function buildContext(
         const withoutGraph = removeSection(userContext, '## Graph Context')
         const graphlessTokens = countTokens(withoutGraph)
         if (graphlessTokens < tuser) {
-            console.log(`[Alpha/Context] Tight budget: dropping graph context (${tuser} → ${graphlessTokens} tokens)`)
+            logger.debug('[Alpha/Context] Tight budget: dropping graph context', {
+                fromTokens: tuser,
+                toTokens: graphlessTokens,
+            })
             userContext = withoutGraph
             tuser = graphlessTokens
             total = tsoul + tuser + tproact + tpulse + thistory + ttools
@@ -191,7 +203,12 @@ export function buildContext(
             const allowedHistory = Math.max(0, MAX_TOKENS - (total - thistory))
             if (allowedHistory < thistory) {
                 const result = truncateHistory(finalHistory, allowedHistory)
-                console.log(`[Alpha/Context] OVERFLOW: ${total}/${MAX_TOKENS} — trimming history (${thistory} → ${result.newTokens} tokens)`)
+                logger.debug('[Alpha/Context] Overflow: trimming history', {
+                    total,
+                    budget: MAX_TOKENS,
+                    fromTokens: thistory,
+                    toTokens: result.newTokens,
+                })
                 finalHistory = result.truncated
                 thistory = result.newTokens
                 total = tsoul + tuser + tproact + tpulse + thistory + ttools
@@ -214,9 +231,21 @@ export function buildContext(
     }
 
     if (total > WARN_TOKENS) {
-        console.warn(`[Alpha/Context] Warning: context budget high (${total}/${MAX_TOKENS})`)
+        logger.warn('[Alpha/Context] Context budget high', {
+            total,
+            budget: MAX_TOKENS,
+        })
     }
-    console.log(`[Alpha/Context] Budget: soul=${tsoul} ctx=${tuser} proactive=${tproact} pulse=${tpulse} history=${thistory} tools=${ttools} total=${total}/${MAX_TOKENS}`)
+    logger.debug('[Alpha/Context] Budget breakdown', {
+        soul: tsoul,
+        userContext: tuser,
+        proactive: tproact,
+        pulseTopics: tpulse,
+        history: thistory,
+        tools: ttools,
+        total,
+        budget: MAX_TOKENS,
+    })
 
     return {
         soul,
