@@ -18,7 +18,7 @@
 import type { StimulusInput, UserContext, ProactiveDecision } from './types.js'
 import { computeFusionScore } from './scoring.js'
 import { getFusionMode } from './mode-switch.js'
-import { evaluatePushback, checkRecovery, PUSHBACK_PULSE_DELTA } from './pushback.js'
+import { evaluatePushback, checkRecovery } from './pushback.js'
 
 function shouldEnforceActiveWindow(): boolean {
     return process.env.NODE_ENV !== 'test'

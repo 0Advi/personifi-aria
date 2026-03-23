@@ -40,6 +40,68 @@ declare module 'fastify' {
 
 const server = Fastify({ logger: true })
 
+type TelegramScalar = string | number
+
+interface TelegramChat {
+  id?: TelegramScalar
+}
+
+interface TelegramUser {
+  id?: TelegramScalar
+}
+
+interface TelegramLocation {
+  latitude: number
+  longitude: number
+}
+
+interface TelegramMessage {
+  chat?: TelegramChat
+  from?: TelegramUser
+  message_id?: TelegramScalar
+  location?: TelegramLocation
+  text?: string
+}
+
+interface TelegramCallbackQuery {
+  id?: string
+  data?: string
+  from?: TelegramUser
+  message?: {
+    chat?: TelegramChat
+  }
+}
+
+interface TelegramReactionEntry {
+  type?: string
+  emoji?: string
+}
+
+interface TelegramMessageReaction {
+  chat?: TelegramChat
+  user?: TelegramUser
+  new_reaction?: TelegramReactionEntry[]
+}
+
+interface TelegramWebhookBody {
+  callback_query?: TelegramCallbackQuery
+  message?: TelegramMessage
+  message_reaction?: TelegramMessageReaction
+}
+
+interface TelegramApiResponse {
+  ok?: boolean
+  description?: string
+  result?: {
+    message_id?: number
+  }
+}
+
+type SlackWebhookBody = Record<string, unknown> & {
+  type?: string
+  challenge?: string
+}
+
 function readPositiveIntEnv(name: string, fallback: number): number {
   const parsed = Number.parseInt(process.env[name] ?? String(fallback), 10)
   if (Number.isNaN(parsed) || parsed <= 0) return fallback
@@ -175,6 +237,19 @@ const THINKING_BUBBLES = [
   '...',
 ]
 
+const LOCATION_ACKS = [
+  (addr: string) => `📍 Got it — <b>${addr}</b>! Give me a sec...`,
+  (addr: string) => `Nice, using <b>${addr}</b>. On it! 🗺️`,
+  (addr: string) => `<b>${addr}</b> — perfect. Hang tight da.`,
+  (addr: string) => `Locked in <b>${addr}</b>. Let me pull this up.`,
+]
+
+const LOCATION_ERRORS = [
+  "Couldn't read your location da — mind typing your area name instead?",
+  "Hmm, that location didn't come through clearly. Just type your neighbourhood and I've got you!",
+  "My GPS sense is off right now 😅 — type your area and I'll sort it.",
+]
+
 /** Placeholder text matched to query type — falls back to a thinking bubble. */
 function placeholderFor(text: string): string {
   const t = text.toLowerCase()
@@ -187,7 +262,7 @@ function placeholderFor(text: string): string {
   return pick(THINKING_BUBBLES)
 }
 
-async function tgFetch(method: string, body: object): Promise<any> {
+async function tgFetch(method: string, body: object): Promise<TelegramApiResponse | null> {
   const token = TOKEN()
   if (!token) return null
   try {
@@ -196,7 +271,7 @@ async function tgFetch(method: string, body: object): Promise<any> {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
-    const data = await res.json().catch(() => ({}))
+    const data = await res.json().catch(() => null) as TelegramApiResponse | null
     if (!res.ok || data?.ok === false) {
       server.log.warn({ method, description: data?.description || res.statusText }, 'Telegram API call failed')
     }
@@ -247,7 +322,7 @@ async function sendVenue(chatId: string, place: {
   })
 }
 
-async function processTelegramCallbackQuery(query: any): Promise<void> {
+async function processTelegramCallbackQuery(query: TelegramCallbackQuery): Promise<void> {
   const chatId = String(query?.message?.chat?.id ?? '')
   const userId = String(query?.from?.id ?? '')
   const callbackId = String(query?.id ?? '')
@@ -285,12 +360,13 @@ async function processTelegramCallbackQuery(query: any): Promise<void> {
   )
 }
 
-async function processTelegramLocationMessage(message: any): Promise<void> {
+async function processTelegramLocationMessage(message: TelegramMessage): Promise<void> {
   const userId = String(message?.from?.id ?? '')
   const chatId = String(message?.chat?.id ?? '')
   const messageId = String(message?.message_id ?? 'location')
+  const location = message.location
 
-  if (!userId || !chatId || !message?.location) {
+  if (!userId || !chatId || !location) {
     return
   }
 
@@ -298,7 +374,7 @@ async function processTelegramLocationMessage(message: any): Promise<void> {
     userId,
     `telegram:location:${messageId}`,
     async () => {
-      const { latitude, longitude } = message.location
+      const { latitude, longitude } = location
       const address = await reverseGeocode(latitude, longitude)
       const user = await getOrCreateUser('telegram', userId)
       await saveUserLocation(user.userId, address)
@@ -333,7 +409,7 @@ async function processTelegramLocationMessage(message: any): Promise<void> {
   )
 }
 
-async function processTelegramTextMessage(body: any): Promise<void> {
+async function processTelegramTextMessage(body: TelegramWebhookBody): Promise<void> {
   const adapter = channels.telegram
   const parsedMessage = adapter.parseWebhook(body)
   if (!parsedMessage) return
@@ -411,7 +487,7 @@ async function processTelegramTextMessage(body: any): Promise<void> {
   )
 }
 
-async function processTelegramWebhook(body: any): Promise<void> {
+async function processTelegramWebhook(body: TelegramWebhookBody): Promise<void> {
   if (body?.callback_query) {
     await processTelegramCallbackQuery(body.callback_query)
     return
@@ -423,7 +499,7 @@ async function processTelegramWebhook(body: any): Promise<void> {
     const userId = String(reaction.user?.id ?? '')
     const positiveEmoji = ['🔥', '👍', '❤️', '😍', '🤩', '🫡', '💯']
     const isPositive = (reaction.new_reaction ?? [])
-      .some((r: any) => r.type === 'emoji' && positiveEmoji.includes(r.emoji))
+      .some(r => r.type === 'emoji' && typeof r.emoji === 'string' && positiveEmoji.includes(r.emoji))
 
     if (isPositive && chatId && userId) {
       setTimeout(async () => {
@@ -456,23 +532,6 @@ async function processTelegramWebhook(body: any): Promise<void> {
 }
 
 // ============================================
-// Randomised Aria acknowledgment strings
-// ============================================
-
-const LOCATION_ACKS = [
-  (addr: string) => `📍 Got it — <b>${addr}</b>! Give me a sec...`,
-  (addr: string) => `Nice, using <b>${addr}</b>. On it! 🗺️`,
-  (addr: string) => `<b>${addr}</b> — perfect. Hang tight da.`,
-  (addr: string) => `Locked in <b>${addr}</b>. Let me pull this up.`,
-]
-
-const LOCATION_ERRORS = [
-  "Couldn't read your location da — mind typing your area name instead?",
-  "Hmm, that location didn't come through clearly. Just type your neighbourhood and I've got you!",
-  "My GPS sense is off right now 😅 — type your area and I'll sort it.",
-]
-
-// ============================================
 // Telegram Webhook
 // ============================================
 
@@ -494,7 +553,7 @@ server.post('/webhook/telegram', async (request, reply) => {
     }
   }
 
-  const body = request.body as any
+  const body = request.body as TelegramWebhookBody
   const dedupKey = extractTelegramWebhookDedupKey(body)
   if (dedupKey && !telegramWebhookDeduper.rememberIfNew(dedupKey)) {
     server.log.info({ dedupKey }, 'Skipping duplicate Telegram webhook')
@@ -553,7 +612,7 @@ server.addHook('preParsing', async (request, reply, payload) => {
 })
 
 server.post('/webhook/slack', async (request, reply) => {
-  const body = request.body as any
+  const body = request.body as SlackWebhookBody
 
   // Handle Slack URL verification first — must come before signature
   // verification because Slack sends this during initial app setup.

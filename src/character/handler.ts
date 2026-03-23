@@ -22,7 +22,7 @@
  * 18-21:  Fire-and-forget writes (SKIPPED for simple messages)
  */
 
-import Groq from 'groq-sdk'
+import type Groq from 'groq-sdk'
 import {
   getOrCreateUser,
   getOrCreateSession,
@@ -72,12 +72,11 @@ import { setScene, toolToFlow } from '../character/scene-manager.js'
 import { generateResponse, type ChatMessage } from '../llm/tierManager.js'
 
 // Proactive content registration + activity tracking
-import { registerProactiveUser, updateUserActivity } from '../media/proactiveRunner.js'
+import { updateUserActivity } from '../media/proactiveRunner.js'
 import { handleFunnelReply } from '../proactive-intent/index.js'
 import { handleTaskReply } from '../task-orchestrator/index.js'
 import { addFriend, acceptFriend, removeFriend, getFriends, getPendingRequests, resolveUserByPlatformId } from '../social/friend-graph.js'
 import { createSquad, inviteToSquad, acceptSquadInvite, leaveSquad, getSquadsForUser, getPendingSquadInvites } from '../social/squad.js'
-import { detectIntentCategory, recordIntentForUserSquads } from '../social/squad-intent.js'
 import { topicIntentService } from '../topic-intent/index.js'
 import type { TopicIntent } from '../topic-intent/types.js'
 import { handleOnboarding, type OnboardingResult } from '../onboarding/onboarding-flow.js'
@@ -88,13 +87,6 @@ import { logger } from '../logger.js'
 
 const log = logger.child({ module: 'handler' })
 
-// Initialize Groq client
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-})
-
-// Model configuration (kept for reference / 8B classifier in cognitive.ts)
-const MODEL = 'llama-3.3-70b-versatile'
 const MAX_TOKENS = 300
 const TEMPERATURE = 0.8
 
@@ -106,7 +98,7 @@ function buildMessages(
   composedSystemPrompt: string,
   sessionMessages: Message[],
   userMessage: string,
-  historyLimit: number = 12,
+  historyLimit = 12,
 ): Groq.Chat.ChatCompletionMessageParam[] {
   const messages: Groq.Chat.ChatCompletionMessageParam[] = []
 
@@ -160,6 +152,42 @@ export interface HandleMessageOptions {
   bypassOnboarding?: boolean
   onboardingResult?: OnboardingResult | null
   lightweightOnboarding?: boolean
+}
+
+type UnknownRecord = Record<string, unknown>
+
+function asRecord(value: unknown): UnknownRecord | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as UnknownRecord
+    : null
+}
+
+function asRecordArray(value: unknown): UnknownRecord[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map(item => asRecord(item))
+    .filter((item): item is UnknownRecord => item !== null)
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined
+}
+
+function asNumber(value: unknown): number | undefined {
+  return typeof value === 'number' ? value : undefined
+}
+
+function getTopLevelImages(data: UnknownRecord): UnknownRecord[] {
+  return asRecordArray(data.images)
+}
+
+function getToolResults(data: UnknownRecord): UnknownRecord[] {
+  return asRecordArray(data.raw ?? data)
+}
+
+function getToolResultsFromRaw(rawData: unknown): UnknownRecord[] {
+  const data = asRecord(rawData)
+  return data ? getToolResults(data) : asRecordArray(rawData)
 }
 
 // ─── Confirmation / Location Gate ────────────────────────────────────────────
@@ -394,49 +422,62 @@ export async function saveUserLocation(userId: string, location: string): Promis
  */
 function extractMediaFromToolResult(toolName: string | null | undefined, rawData: unknown): MessageResponse['media'] | undefined {
   if (toolName !== 'search_places') return undefined
-  if (!rawData || typeof rawData !== 'object') return undefined
+  const data = asRecord(rawData)
 
-  const data = rawData as any
   const isMapPreviewUrl = (url: string): boolean => /maps\.googleapis\.com\/maps\/api\/staticmap/i.test(url)
+  const images = data ? getTopLevelImages(data) : []
+  const firstImage = images[0]
 
   // Diagnostic: trace what rawData looks like
   const keys = data ? Object.keys(data) : []
-  const hasImages = Array.isArray(data?.images)
-  const imagesCount = hasImages ? data.images.length : 0
-  log.debug({ keys, hasImages, imagesCount, firstImageUrl: data?.images?.[0]?.url?.substring(0, 60) ?? 'N/A' }, 'extractMedia diagnostic')
+  const firstImageUrl = asString(firstImage?.url)
+  log.debug({ keys, hasImages: images.length > 0, imagesCount: images.length, firstImageUrl: firstImageUrl?.substring(0, 60) ?? 'N/A' }, 'extractMedia diagnostic')
 
   // Grocery comparison: has a top-level images[] array with {url, caption}
-  if (Array.isArray(data?.images)) {
-    const media = data.images
-      .filter((img: any) => typeof img?.url === 'string' && !isMapPreviewUrl(img.url))
+  if (images.length > 0) {
+    const media = images
+      .filter(img => {
+        const url = asString(img.url)
+        return typeof url === 'string' && !isMapPreviewUrl(url)
+      })
       .slice(0, 6)
-      .map((img: any) => ({
+      .map(img => ({
         type: 'photo' as const,
-        url: img.url,
-        caption: img.caption,
+        url: asString(img.url) ?? '',
+        caption: asString(img.caption),
       }))
     if (media.length > 0) return media
   }
 
   // Food comparison: raw[] contains restaurant objects with items[].imageUrl
-  const results = data?.raw ?? data
-  if (!Array.isArray(results)) return undefined
+  const results = getToolResultsFromRaw(rawData)
+  if (results.length === 0) return undefined
 
   const media: { type: 'photo'; url: string; caption?: string }[] = []
 
   for (const r of results) {
     // Restaurant-level image
-    if (r?.restaurantImageUrl && media.length === 0) {
+    if (asString(r.restaurantImageUrl) && media.length === 0) {
       // Only add restaurant image if no dish images yet
     }
-    if (!r?.items || !Array.isArray(r.items)) continue
-    for (const item of r.items) {
-      if (item.imageUrl && media.length < 5) {
-        const badge = item.isBestseller ? ' ⭐ BESTSELLER' : ''
+    const items = asRecordArray(r.items)
+    if (items.length === 0) continue
+
+    for (const item of items) {
+      const imageUrl = asString(item.imageUrl)
+      if (imageUrl && media.length < 5) {
+        const badge = item.isBestseller === true ? ' ⭐ BESTSELLER' : ''
+        const itemName = asString(item.name) ?? 'Item'
+        const itemPrice = item.price
+        const priceLabel = typeof itemPrice === 'number' || typeof itemPrice === 'string'
+          ? `₹${itemPrice}`
+          : 'Price unavailable'
+        const restaurant = asString(r.restaurant) ?? 'Unknown restaurant'
+        const platform = asString(r.platform) ?? 'unknown'
         media.push({
           type: 'photo',
-          url: item.imageUrl,
-          caption: `${item.name} — ₹${item.price}${badge}\n📍 ${r.restaurant} (${r.platform})`,
+          url: imageUrl,
+          caption: `${itemName} — ${priceLabel}${badge}\n📍 ${restaurant} (${platform})`,
         })
       }
     }
@@ -455,22 +496,23 @@ function extractVenuesFromToolResult(
   toolName: string | null | undefined,
   rawData: unknown
 ): MessageResponse['venues'] | undefined {
-  if (!rawData || typeof rawData !== 'object') return undefined
-
-  const data = rawData as any
+  const data = asRecord(rawData)
 
   // Places API: raw data has a places[] array (or data.raw has it)
   if (toolName === 'search_places') {
-    const places = data?.raw ?? data
-    if (!Array.isArray(places)) return undefined
+    const places = getToolResultsFromRaw(rawData)
+    if (places.length === 0) return undefined
 
     const venues: { name: string; address: string; lat: number; lng: number }[] = []
     for (const place of places.slice(0, 3)) {
-      const name = place.displayName?.text || place.name
-      const address = place.formattedAddress || place.address || ''
-      const lat = place.location?.latitude ?? place.location?.lat
-      const lng = place.location?.longitude ?? place.location?.lng
-      if (name && typeof lat === 'number' && typeof lng === 'number') {
+      const displayName = asRecord(place.displayName)
+      const location = asRecord(place.location)
+      const name = asString(displayName?.text) ?? asString(place.name)
+      const address = asString(place.formattedAddress) ?? asString(place.address) ?? ''
+      const lat = asNumber(location?.latitude) ?? asNumber(location?.lat)
+      const lng = asNumber(location?.longitude) ?? asNumber(location?.lng)
+
+      if (name && lat !== undefined && lng !== undefined) {
         venues.push({ name, address, lat, lng })
       }
     }
@@ -479,15 +521,26 @@ function extractVenuesFromToolResult(
 
   // Directions API: destination from route legs
   if (toolName === 'get_directions') {
-    const routes = data?.raw?.routes ?? data?.routes
-    if (!Array.isArray(routes) || routes.length === 0) return undefined
-    const leg = routes[0]?.legs?.[routes[0]?.legs?.length - 1]
-    if (!leg?.end_location) return undefined
+    if (!data) return undefined
+    const routeData = asRecord(data.raw) ?? data
+    const routes = asRecordArray(routeData.routes)
+    if (routes.length === 0) return undefined
+
+    const legs = asRecordArray(routes[0]?.legs)
+    const leg = legs[legs.length - 1]
+    const endLocation = asRecord(leg?.end_location)
+    if (!leg || !endLocation) return undefined
+
+    const lat = asNumber(endLocation.lat)
+    const lng = asNumber(endLocation.lng)
+    if (lat === undefined || lng === undefined) return undefined
+
+    const endAddress = asString(leg.end_address) ?? ''
     return [{
-      name: leg.end_address?.split(',')[0] || 'Destination',
-      address: leg.end_address || '',
-      lat: leg.end_location.lat,
-      lng: leg.end_location.lng,
+      name: endAddress.split(',')[0] || 'Destination',
+      address: endAddress,
+      lat,
+      lng,
     }]
   }
 
@@ -991,11 +1044,13 @@ export async function handleMessage(
           routeDecision = proactiveDecision
           toolRawData = proactiveResult.raw
           toolMediaDirective = proactiveResult.mediaDirective ?? null
-          rememberToolContext(
-            user.userId,
-            extractToolMediaContext(proactiveDecision.toolName!, proactiveResult.raw),
-            toolMediaDirective,
-          )
+          if (proactiveDecision.toolName) {
+            rememberToolContext(
+              user.userId,
+              extractToolMediaContext(proactiveDecision.toolName, proactiveResult.raw),
+              toolMediaDirective,
+            )
+          }
           toolResultStr = toolResultStr
             ? `${toolResultStr}\n\n${proactiveResult.data}${proactiveHint}`
             : `${proactiveResult.data}${proactiveHint}`

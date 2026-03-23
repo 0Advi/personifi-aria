@@ -473,7 +473,7 @@ export async function appendMessages(
  */
 export async function trimSessionHistory(
   sessionId: string,
-  maxPairs: number = 20
+  maxPairs = 20
 ): Promise<void> {
   const db = getPool()
 
@@ -544,7 +544,7 @@ export async function trackUsage(
   channel: string,
   inputTokens: number,
   outputTokens: number,
-  cachedTokens: number = 0
+  cachedTokens = 0
 ): Promise<void> {
   const db = getPool()
 
