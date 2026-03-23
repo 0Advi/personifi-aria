@@ -29,7 +29,7 @@ const CHECK = `${GREEN}✅${RESET}`
 const CROSS = `${RED}❌${RESET}`
 const WARN = `${YELLOW}⚠️${RESET}`
 
-function print(line: string = ''): void {
+function print(line = ''): void {
     process.stdout.write(`${line}\n`)
 }
 

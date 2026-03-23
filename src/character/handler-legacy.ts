@@ -22,7 +22,7 @@
  * 18-21:  Fire-and-forget writes (SKIPPED for simple messages)
  */
 
-import Groq from 'groq-sdk'
+import type Groq from 'groq-sdk'
 import {
   getOrCreateUser,
   getOrCreateSession,
@@ -78,7 +78,6 @@ import { handleFunnelReply } from '../proactive-intent/index.js'
 import { handleTaskReply } from '../task-orchestrator/index.js'
 import { addFriend, acceptFriend, removeFriend, getFriends, getPendingRequests, resolveUserByPlatformId } from '../social/friend-graph.js'
 import { createSquad, inviteToSquad, acceptSquadInvite, leaveSquad, getSquadsForUser, getPendingSquadInvites } from '../social/squad.js'
-import { detectIntentCategory, recordIntentForUserSquads } from '../social/squad-intent.js'
 import { topicIntentService } from '../topic-intent/index.js'
 import type { TopicIntent } from '../topic-intent/types.js'
 import { handleOnboarding, type OnboardingResult } from '../onboarding/onboarding-flow.js'
@@ -91,13 +90,6 @@ import {
   buildVenuePreviewMedia,
 } from './response-artifacts.js'
 
-// Initialize Groq client
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-})
-
-// Model configuration (kept for reference / 8B classifier in cognitive.ts)
-const MODEL = 'llama-3.3-70b-versatile'
 const MAX_TOKENS = 300
 const TEMPERATURE = 0.8
 
@@ -109,7 +101,7 @@ function buildMessages(
   composedSystemPrompt: string,
   sessionMessages: Message[],
   userMessage: string,
-  historyLimit: number = 12,
+  historyLimit = 12,
 ): Groq.Chat.ChatCompletionMessageParam[] {
   const messages: Groq.Chat.ChatCompletionMessageParam[] = []
 
@@ -903,14 +895,17 @@ export async function handleMessage(
           `Offer one concrete next action. Do NOT ask generic openers like "what are you in the mood for?" or "what's on your mind?"]`
 
         if (proactiveResult?.success && proactiveResult.data) {
+          const proactiveToolName = proactiveDecision.toolName
           routeDecision = proactiveDecision
           toolRawData = proactiveResult.raw
           toolMediaDirective = proactiveResult.mediaDirective ?? null
-          rememberToolContext(
-            user.userId,
-            extractToolMediaContext(proactiveDecision.toolName!, proactiveResult.raw),
-            toolMediaDirective,
-          )
+          if (proactiveToolName) {
+            rememberToolContext(
+              user.userId,
+              extractToolMediaContext(proactiveToolName, proactiveResult.raw),
+              toolMediaDirective,
+            )
+          }
           toolResultStr = toolResultStr
             ? `${toolResultStr}\n\n${proactiveResult.data}${proactiveHint}`
             : `${proactiveResult.data}${proactiveHint}`
@@ -1220,12 +1215,13 @@ export async function handleMessage(
         // ─── Execution Bridge: Completion Hook ─────────────────────────
         // When a tool fired for an executing-phase topic, mark it as completed.
         if (routeDecision.useTool && toolResultStr && executingTopic) {
+          const completedTopic = executingTopic
           topicIntentService.completeTopic(user.userId, executingTopic.id)
-            .then(() => logTopicCompleted(user.userId, executingTopic!.id, executingTopic!.topic))
+            .then(() => logTopicCompleted(user.userId, completedTopic.id, completedTopic.topic))
             .catch(err => {
               logger.error('[handler] Topic completion failed', {
                 userId: user.userId,
-                topicId: executingTopic.id,
+                topicId: completedTopic.id,
                 error: safeError(err),
               })
             })
