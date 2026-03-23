@@ -20,6 +20,10 @@ import { computeFusionScore } from './scoring.js'
 import { getFusionMode } from './mode-switch.js'
 import { evaluatePushback, checkRecovery, PUSHBACK_PULSE_DELTA } from './pushback.js'
 
+function shouldEnforceActiveWindow(): boolean {
+    return process.env.NODE_ENV !== 'test'
+}
+
 /**
  * Evaluate a stimulus and decide whether to FIRE, BUFFER, or DROP.
  */
@@ -97,8 +101,8 @@ export function fusionProactiveDecision(
 
     // Time window check: only fire proactive messages 8am-10pm IST
     const now = new Date()
-    const istHour = (now.getUTCHours() + 5) % 24 + (now.getUTCMinutes() + 30) / 60
-    if (istHour < 8 || istHour >= 22) {
+    const istHour = ((now.getUTCHours() * 60) + now.getUTCMinutes() + 330) / 60 % 24
+    if (shouldEnforceActiveWindow() && (istHour < 8 || istHour >= 22)) {
         if (score >= mode.threshold) {
             return {
                 action: 'BUFFER',

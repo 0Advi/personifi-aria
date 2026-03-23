@@ -36,6 +36,14 @@ export interface Session {
 // Database pool (initialize with DATABASE_URL)
 let pool: Pool | null = null
 
+function readPoolSize(): number {
+  const parsed = Number.parseInt(process.env.DB_POOL_MAX ?? '20', 10)
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    return 20
+  }
+  return parsed
+}
+
 export function initDatabase(databaseUrl: string): void {
   // Strip sslmode from URL — 'no-verify' is non-standard and confuses the pg library.
   // We handle SSL explicitly via the ssl option below.
@@ -43,7 +51,7 @@ export function initDatabase(databaseUrl: string): void {
 
   pool = new Pool({
     connectionString: cleanUrl,
-    max: 10,
+    max: readPoolSize(),
     idleTimeoutMillis: 30000,
     ssl: process.env.NODE_ENV === 'production'
       ? {

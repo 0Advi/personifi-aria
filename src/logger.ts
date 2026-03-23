@@ -13,12 +13,27 @@
  */
 
 import pino from 'pino'
+import { createRequire } from 'node:module'
 
 const isDev = process.env.NODE_ENV !== 'production'
+const require = createRequire(import.meta.url)
+
+function canUsePrettyTransport(): boolean {
+    if (!isDev) return false
+
+    try {
+        require.resolve('pino-pretty')
+        return true
+    } catch {
+        return false
+    }
+}
+
+const prettyTransportEnabled = canUsePrettyTransport()
 
 export const logger = pino({
     level: process.env.LOG_LEVEL ?? (isDev ? 'debug' : 'info'),
-    ...(isDev && {
+    ...(prettyTransportEnabled && {
         transport: {
             target: 'pino-pretty',
             options: {

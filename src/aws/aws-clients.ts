@@ -6,7 +6,7 @@ const log = logger.child({ module: 'aws-clients' })
 // ─── Subagent Type ───────────────────────────────────────────────────────────
 
 /** Identifies which subagent owns a client factory instance. */
-export type SubagentName = 'Pulse' | 'Archivist' | 'Scout' | 'Intelligence' | 'Social' | 'Shared'
+export type SubagentName = 'Pulse' | 'Archivist' | 'Scout' | 'Intelligence' | 'Sentinel' | 'Social' | 'Shared'
 
 // ─── Per-Subagent Client Factory ─────────────────────────────────────────────
 
@@ -269,6 +269,7 @@ export const pulseClients = new AwsClientFactory('Pulse')
 export const archivistClients = new AwsClientFactory('Archivist')
 export const scoutClients = new AwsClientFactory('Scout')
 export const intelligenceClients = new AwsClientFactory('Intelligence')
+export const sentinelClients = new AwsClientFactory('Sentinel')
 export const socialClients = new AwsClientFactory('Social')
 export const sharedClients = new AwsClientFactory('Shared')
 

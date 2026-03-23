@@ -2,219 +2,226 @@
  * Message Queue — Per-User Concurrency Control (Issue #139)
  *
  * Guarantees:
- *   Same user   → sequential processing (no races, correct ordering)
- *   Diff users  → parallel processing  (max throughput)
+ *   Same user   -> sequential processing (no races, correct ordering)
+ *   Diff users  -> parallel processing (bounded by MAX_CONCURRENT_USERS)
  *
  * Features:
  *   1. Per-user Promise chain — each message awaits the previous one for that user
- *   2. Queue depth cap — reject if > MAX_QUEUE_DEPTH_PER_USER pending
- *   3. Provider rate limiting — token bucket per LLM provider
- *   4. No external dependencies — in-memory Map, works on a single instance
- *
- * Environment variables:
- *   MAX_CONCURRENT_USERS=50      (informational; in-memory map scales naturally)
- *   MAX_QUEUE_DEPTH_PER_USER=5
+ *   2. Queue depth cap — reject when pending depth reaches MAX_QUEUE_DEPTH_PER_USER
+ *   3. 5-minute webhook dedup helper for retry-safe delivery
+ *   4. No external dependencies — in-memory Map based queue for single-instance deploys
  */
 
-import { logger as rootLogger } from '../logger.js'
+import { logger } from '../utils/logger.js'
 
-const log = rootLogger.child({ module: 'concurrency/queue' })
+export const DEFAULT_QUEUE_OVERFLOW_MESSAGE = "I'm processing your previous messages, one moment."
+const DEFAULT_MAX_QUEUE_DEPTH_PER_USER = 5
+const DEFAULT_MAX_CONCURRENT_USERS = 50
 
-// ─── Config ───────────────────────────────────────────────────────────────────
-
-const MAX_QUEUE_DEPTH = parseInt(process.env.MAX_QUEUE_DEPTH_PER_USER ?? '5', 10)
-
-// ─── Per-User Queue State ─────────────────────────────────────────────────────
-
-interface UserQueueEntry {
-    /** Pending tail of the promise chain for this user */
-    tail: Promise<void>
-    /** How many messages are currently queued (including in-flight) */
-    depth: number
+export interface MessageQueueOptions {
+  maxQueueDepthPerUser?: number
+  maxConcurrentUsers?: number
+  now?: () => number
 }
 
-const userQueues = new Map<string, UserQueueEntry>()
-
-// ─── Rate Limiter (token bucket per provider) ─────────────────────────────────
-
-interface TokenBucket {
-    /** Capacity of the bucket (max tokens = max RPM) */
-    capacity: number
-    /** Current token count */
-    tokens: number
-    /** Timestamp of last refill (ms) */
-    lastRefill: number
-    /** Tokens added per millisecond */
-    ratePerMs: number
+export interface QueueJob<T> {
+  userId: string
+  jobId: string
+  task: () => Promise<T>
 }
 
-const providerBuckets = new Map<string, TokenBucket>()
+export class QueueOverflowError extends Error {
+  readonly userId: string
+  readonly queueDepth: number
+  readonly maxQueueDepth: number
 
-const PROVIDER_RPMS: Record<string, number> = {
-    together: 600,
-    fireworks: 300,
-    groq: 30,
-    bedrock: 100,
+  constructor(userId: string, queueDepth: number, maxQueueDepth: number) {
+    super(DEFAULT_QUEUE_OVERFLOW_MESSAGE)
+    this.name = 'QueueOverflowError'
+    this.userId = userId
+    this.queueDepth = queueDepth
+    this.maxQueueDepth = maxQueueDepth
+  }
 }
 
-function getBucket(provider: string): TokenBucket {
-    if (!providerBuckets.has(provider)) {
-        const rpm = PROVIDER_RPMS[provider] ?? 60
-        providerBuckets.set(provider, {
-            capacity: rpm,
-            tokens: rpm,
-            lastRefill: Date.now(),
-            ratePerMs: rpm / 60_000,
+class GlobalConcurrencyGate {
+  private activeCount = 0
+  private readonly waiters: Array<() => void> = []
+
+  constructor(private readonly limit: number) { }
+
+  async acquire(): Promise<() => void> {
+    if (this.limit <= 0 || this.activeCount < this.limit) {
+      this.activeCount += 1
+      return () => this.release()
+    }
+
+    return new Promise(resolve => {
+      this.waiters.push(() => {
+        this.activeCount += 1
+        resolve(() => this.release())
+      })
+    })
+  }
+
+  private release(): void {
+    this.activeCount = Math.max(0, this.activeCount - 1)
+    const next = this.waiters.shift()
+    if (next) next()
+  }
+}
+
+export class MessageQueue {
+  private readonly maxQueueDepthPerUser: number
+  private readonly now: () => number
+  private readonly tails = new Map<string, Promise<void>>()
+  private readonly depths = new Map<string, number>()
+  private readonly concurrencyGate: GlobalConcurrencyGate
+
+  constructor(options: MessageQueueOptions = {}) {
+    this.maxQueueDepthPerUser = options.maxQueueDepthPerUser ?? DEFAULT_MAX_QUEUE_DEPTH_PER_USER
+    this.now = options.now ?? Date.now
+    this.concurrencyGate = new GlobalConcurrencyGate(options.maxConcurrentUsers ?? DEFAULT_MAX_CONCURRENT_USERS)
+  }
+
+  getDepth(userId: string): number {
+    return this.depths.get(userId) ?? 0
+  }
+
+  async enqueue<T>({ userId, jobId, task }: QueueJob<T>): Promise<T> {
+    const currentDepth = this.getDepth(userId)
+    if (currentDepth >= this.maxQueueDepthPerUser) {
+      logger.warn(`[Queue] user=${userId} enqueue ${jobId} rejected`, {
+        queueDepth: currentDepth,
+        maxQueueDepth: this.maxQueueDepthPerUser,
+      })
+      throw new QueueOverflowError(userId, currentDepth, this.maxQueueDepthPerUser)
+    }
+
+    const nextDepth = currentDepth + 1
+    this.depths.set(userId, nextDepth)
+    logger.info(`[Queue] user=${userId} enqueue ${jobId}`, {
+      queueDepth: nextDepth,
+      waiting: nextDepth > 1,
+    })
+
+    const previousTail = this.tails.get(userId) ?? Promise.resolve()
+    const run = previousTail.catch(() => undefined).then(async () => {
+      const release = await this.concurrencyGate.acquire()
+      const start = this.now()
+
+      logger.info(`[Queue] user=${userId} processing ${jobId}`)
+
+      try {
+        const result = await task()
+        logger.info(`[Queue] user=${userId} ${jobId} complete`, {
+          elapsedMs: this.now() - start,
         })
-    }
-    return providerBuckets.get(provider)!
+        return result
+      } catch (error) {
+        logger.error(`[Queue] user=${userId} ${jobId} failed`, {
+          elapsedMs: this.now() - start,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        throw error
+      } finally {
+        release()
+      }
+    })
+
+    const settledTail = run.then(() => undefined, () => undefined)
+    this.tails.set(userId, settledTail)
+
+    return run.finally(() => {
+      const remaining = Math.max(0, this.getDepth(userId) - 1)
+      if (remaining === 0) {
+        this.depths.delete(userId)
+      } else {
+        this.depths.set(userId, remaining)
+      }
+
+      if (this.tails.get(userId) === settledTail) {
+        this.tails.delete(userId)
+      }
+    })
+  }
 }
 
-function refillBucket(bucket: TokenBucket): void {
-    const now = Date.now()
-    const elapsed = now - bucket.lastRefill
-    const replenished = elapsed * bucket.ratePerMs
-    bucket.tokens = Math.min(bucket.capacity, bucket.tokens + replenished)
-    bucket.lastRefill = now
+export interface WebhookDeduperOptions {
+  ttlMs?: number
+  now?: () => number
 }
 
-/**
- * Try to consume one token for a provider.
- * Returns true if the request can proceed immediately.
- */
-export function tryConsumeProviderSlot(provider: string): boolean {
-    const bucket = getBucket(provider)
-    refillBucket(bucket)
+export class WebhookDeduper {
+  private readonly ttlMs: number
+  private readonly now: () => number
+  private readonly entries = new Map<string, number>()
 
-    if (bucket.tokens >= 1) {
-        bucket.tokens -= 1
-        if (bucket.tokens / bucket.capacity < 0.05) {
-            log.warn(
-                { provider, remaining: Math.floor(bucket.tokens), capacity: bucket.capacity },
-                `[RateLimit] ${provider}: ${Math.floor(bucket.tokens)}/${bucket.capacity} RPM — approaching limit`
-            )
-        }
-        return true
-    }
+  constructor(options: WebhookDeduperOptions = {}) {
+    this.ttlMs = options.ttlMs ?? 5 * 60 * 1000
+    this.now = options.now ?? Date.now
+  }
 
-    log.warn({ provider, capacity: bucket.capacity }, `[RateLimit] ${provider}: ${bucket.capacity}/${bucket.capacity} RPM — throttling (queuing requests)`)
-    return false
-}
+  rememberIfNew(key: string): boolean {
+    const now = this.now()
+    this.prune(now)
 
-/**
- * Wait until a provider slot is available (at most ~2 seconds).
- */
-export async function waitForProviderSlot(provider: string, timeoutMs = 2_000): Promise<void> {
-    const deadline = Date.now() + timeoutMs
-    const bucket = getBucket(provider)
-
-    while (Date.now() < deadline) {
-        refillBucket(bucket)
-        if (bucket.tokens >= 1) {
-            bucket.tokens -= 1
-            log.debug({ provider }, `[RateLimit] ${provider}: bucket refilled, resuming`)
-            return
-        }
-        // Wait for ~1 token's worth of time then retry
-        const waitMs = Math.min(Math.ceil(1 / bucket.ratePerMs), 200)
-        await new Promise(r => setTimeout(r, waitMs))
-    }
-
-    log.warn({ provider, timeoutMs }, `[RateLimit] ${provider}: slot wait timed out — proceeding anyway`)
-}
-
-// ─── Public API ───────────────────────────────────────────────────────────────
-
-/**
- * Enqueue a message handler for a user.
- * - Same user messages are sequenced: each one awaits the previous.
- * - Different user messages run in parallel.
- * - If queue depth exceeds MAX_QUEUE_DEPTH, returns an overflow result.
- *
- * @param userId   User identifier (for per-user sequencing)
- * @param msgIndex Monotonic message index (for log traceability)
- * @param fn       The async task to execute (e.g. handleMessage call)
- * @returns        Result of fn, or an overflow sentinel
- */
-export async function enqueueForUser<T>(
-    userId: string,
-    msgIndex: number,
-    fn: () => Promise<T>,
-): Promise<T | { __overflow: true }> {
-    // Get or create queue entry
-    let entry = userQueues.get(userId)
-
-    if (!entry) {
-        entry = { tail: Promise.resolve(), depth: 0 }
-        userQueues.set(userId, entry)
+    const expiresAt = this.entries.get(key)
+    if (expiresAt && expiresAt > now) {
+      return false
     }
 
-    // Check queue depth
-    if (entry.depth >= MAX_QUEUE_DEPTH) {
-        log.warn(
-            { userId, depth: entry.depth, max: MAX_QUEUE_DEPTH },
-            `[Queue] user=${userId} enqueue msg#${msgIndex} — REJECTED (queue depth ${entry.depth} exceeded)`
-        )
-        return { __overflow: true }
+    this.entries.set(key, now + this.ttlMs)
+    return true
+  }
+
+  size(): number {
+    this.prune(this.now())
+    return this.entries.size
+  }
+
+  private prune(now: number): void {
+    for (const [key, expiresAt] of this.entries.entries()) {
+      if (expiresAt <= now) {
+        this.entries.delete(key)
+      }
     }
-
-    entry.depth++
-    log.info({ userId, depth: entry.depth }, `[Queue] user=${userId} enqueue msg#${msgIndex} (queue depth: ${entry.depth})`)
-
-    // Chain onto the user's tail
-    let resolveStep!: () => void
-    const stepDone = new Promise<void>(r => { resolveStep = r })
-
-    const prevTail = entry.tail
-    entry.tail = stepDone
-
-    // Execute when our turn comes
-    let result: T
-    try {
-        await prevTail // wait for any in-flight message to complete
-        log.info({ userId }, `[Queue] user=${userId} processing msg#${msgIndex}`)
-
-        const start = Date.now()
-        result = await fn()
-        const elapsed = Date.now() - start
-
-        log.info({ userId, elapsed }, `[Queue] user=${userId} msg#${msgIndex} complete (${elapsed}ms)`)
-    } finally {
-        entry.depth = Math.max(0, entry.depth - 1)
-        resolveStep()
-
-        // Clean up idle entries to prevent memory leak
-        if (entry.depth === 0) {
-            // Give a brief grace period before removing (next message may arrive immediately)
-            setTimeout(() => {
-                const current = userQueues.get(userId)
-                if (current && current.depth === 0) {
-                    userQueues.delete(userId)
-                }
-            }, 5_000)
-        }
-    }
-
-    return result!
+  }
 }
 
-/**
- * Return true if the result was a queue overflow (caller should send overflow message).
- */
-export function isQueueOverflow<T>(result: T | { __overflow: true }): result is { __overflow: true } {
-    return typeof result === 'object' && result !== null && '__overflow' in result
+type UnknownRecord = Record<string, unknown>
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return typeof value === 'object' && value !== null
 }
 
-/**
- * Current queue depth for a user (0 = idle).
- */
-export function getUserQueueDepth(userId: string): number {
-    return userQueues.get(userId)?.depth ?? 0
+function stringifyDedupPart(value: unknown): string | null {
+  if (typeof value === 'string' && value.length > 0) return value
+  if (typeof value === 'number') return String(value)
+  return null
 }
 
-/**
- * Number of users with active queues (diagnostic).
- */
-export function getActiveUserCount(): number {
-    return userQueues.size
+export function extractTelegramWebhookDedupKey(body: unknown): string | null {
+  if (!isRecord(body)) return null
+
+  const updateId = stringifyDedupPart(body.update_id)
+  if (updateId) {
+    return `telegram:update:${updateId}`
+  }
+
+  const callbackQuery = isRecord(body.callback_query) ? body.callback_query : null
+  const callbackId = stringifyDedupPart(callbackQuery?.id)
+  if (callbackId) {
+    return `telegram:callback:${callbackId}`
+  }
+
+  const message = isRecord(body.message) ? body.message : null
+  const messageId = stringifyDedupPart(message?.message_id)
+  const chat = isRecord(message?.chat) ? message?.chat : null
+  const chatId = stringifyDedupPart(chat?.id)
+  if (chatId && messageId) {
+    return `telegram:message:${chatId}:${messageId}`
+  }
+
+  return null
 }

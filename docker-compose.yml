@@ -40,6 +40,21 @@ services:
       # Fusion architecture (Phase 1)
       - FUSION_ENGINE_ENABLED=${FUSION_ENGINE_ENABLED:-false}
       - SOUL_V2_ENABLED=${SOUL_V2_ENABLED:-false}
+      # Phase 2B concurrency
+      - MAX_CONCURRENT_USERS=${MAX_CONCURRENT_USERS:-50}
+      - MAX_QUEUE_DEPTH_PER_USER=${MAX_QUEUE_DEPTH_PER_USER:-5}
+      - DB_POOL_MAX=${DB_POOL_MAX:-20}
+      # Phase 2B provider migration
+      - TOGETHER_API_KEY=${TOGETHER_API_KEY}
+      - TOGETHER_MODEL=${TOGETHER_MODEL:-meta-llama/Llama-3.3-70B-Instruct-Turbo}
+      - FIREWORKS_API_KEY=${FIREWORKS_API_KEY}
+      - FIREWORKS_MODEL=${FIREWORKS_MODEL:-accounts/fireworks/models/llama-v3p3-70b-instruct}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+      - AWS_ENABLED=${AWS_ENABLED:-false}
+      - AWS_BEDROCK_REGION=${AWS_BEDROCK_REGION:-ap-south-1}
+      - AWS_BEDROCK_MODEL_ID=${AWS_BEDROCK_MODEL_ID:-anthropic.claude-3-haiku-20240307-v1:0}
       # Identity
       - LINK_CODE_EXPIRY_MINUTES=${LINK_CODE_EXPIRY_MINUTES:-10}
       # Travel tools

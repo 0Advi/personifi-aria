@@ -1244,21 +1244,30 @@ export async function handleMessage(
       })
     }
 
-    // ─── Step 16: Track usage (estimated) ──────────────────────────
-    // Tier manager abstracts the completion object; use estimates
+    // ─── Steps 16-17: Non-blocking durable writes in parallel ─────
+    // These writes do not affect the current response payload, so run them
+    // concurrently instead of serializing additional I/O on the hot path.
     const estPromptTokens = Math.round(estimateTokens(messages))
     const estCompletionTokens = Math.round(rawResponse.length / 4)
-    await trackUsage(
-      user.userId,
-      channel,
-      estPromptTokens,
-      estCompletionTokens,
-      0
-    )
+    const postResponseWrites: Promise<unknown>[] = [
+      trackUsage(
+        user.userId,
+        channel,
+        estPromptTokens,
+        estCompletionTokens,
+        0,
+      ),
+    ]
 
-    // ─── Step 17: Extract auth info (existing) ────────────────────
     if (!onboardingActive) {
-      await extractAndSaveUserInfo(user.userId, userMessage, user)
+      postResponseWrites.push(extractAndSaveUserInfo(user.userId, userMessage, user))
+    }
+
+    const postWriteResults = await Promise.allSettled(postResponseWrites)
+    for (const result of postWriteResults) {
+      if (result.status === 'rejected') {
+        console.warn('[handler] Post-response write failed:', safeError(result.reason))
+      }
     }
 
     // ─── Step 17b: Pulse engagement scoring (always fire-and-forget) ─
@@ -1271,51 +1280,58 @@ export async function handleMessage(
 
     if (!lightweightOnboarding) {
       setImmediate(() => {
-        // Topic intent processing — fire-and-forget, NEVER block the response
+        const backgroundWrites: Promise<unknown>[] = []
+
         if (!isSimple) {
-          topicIntentService.processMessage(
-            user.userId,
-            session.sessionId,
-            userMessage,
-            classification,
-          ).catch(err => {
-            log.error({ err }, 'Topic intent processing failed')
-          })
+          backgroundWrites.push(
+            topicIntentService.processMessage(
+              user.userId,
+              session.sessionId,
+              userMessage,
+              classification,
+            ),
+          )
         }
 
-        // ─── Execution Bridge: Completion Hook ─────────────────────────
-        // When a tool fired for an executing-phase topic, mark it as completed.
         if (routeDecision.useTool && toolResultStr && executingTopic) {
-          topicIntentService.completeTopic(user.userId, executingTopic.id)
-            .then(() => logTopicCompleted(user.userId, executingTopic!.id, executingTopic!.topic))
-            .catch(err => {
-              log.error({ err }, 'Topic completion failed')
-            })
+          const completedTopic = executingTopic
+          backgroundWrites.push(
+            topicIntentService.completeTopic(user.userId, completedTopic.id)
+              .then(() => logTopicCompleted(user.userId, completedTopic.id, completedTopic.topic)),
+          )
         }
 
-        pulseService.recordEngagement({
-          userId: user.userId,
-          message: userMessage,
-          previousUserMessage,
-          previousMessageAt,
-          classifierSignal: classification.userSignal,
-        }).catch(err => {
-          log.error({ err: safeError(err) }, 'Pulse scoring failed')
-        })
+        backgroundWrites.push(
+          pulseService.recordEngagement({
+            userId: user.userId,
+            message: userMessage,
+            previousUserMessage,
+            previousMessageAt,
+            classifierSignal: classification.userSignal,
+          }),
+        )
 
-        agendaPlanner.evaluate({
-          userId: user.userId,
-          sessionId: session.sessionId,
-          message: userMessage,
-          displayName: user.displayName,
-          homeLocation: user.homeLocation,
-          pulseState: pulseEngagementState,
-          classifierGoal: cognitiveState.conversationGoal,
-          messageComplexity: classification.message_complexity,
-          activeToolName: routeDecision?.toolName ?? undefined,
-          hasToolResult: !!toolResultStr,
-        }).catch(err => {
-          log.error({ err: safeError(err) }, 'Agenda planner evaluation failed')
+        backgroundWrites.push(
+          agendaPlanner.evaluate({
+            userId: user.userId,
+            sessionId: session.sessionId,
+            message: userMessage,
+            displayName: user.displayName,
+            homeLocation: user.homeLocation,
+            pulseState: pulseEngagementState,
+            classifierGoal: cognitiveState.conversationGoal,
+            messageComplexity: classification.message_complexity,
+            activeToolName: routeDecision?.toolName ?? undefined,
+            hasToolResult: !!toolResultStr,
+          }),
+        )
+
+        Promise.allSettled(backgroundWrites).then(results => {
+          for (const result of results) {
+            if (result.status === 'rejected') {
+              log.error({ err: safeError(result.reason) }, 'Background write failed')
+            }
+          }
         })
       })
     }

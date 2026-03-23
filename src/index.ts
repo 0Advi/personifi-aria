@@ -23,6 +23,13 @@ import {
 } from './channels.js'
 import { pendingLocationStore, reverseGeocode } from './location.js'
 import { setLiveUserLocation } from './location-presence.js'
+import {
+  DEFAULT_QUEUE_OVERFLOW_MESSAGE,
+  MessageQueue,
+  QueueOverflowError,
+  WebhookDeduper,
+  extractTelegramWebhookDedupKey,
+} from './concurrency/message-queue.js'
 
 // Type augmentation for raw body on Slack requests
 declare module 'fastify' {
@@ -32,6 +39,19 @@ declare module 'fastify' {
 }
 
 const server = Fastify({ logger: true })
+
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const parsed = Number.parseInt(process.env[name] ?? String(fallback), 10)
+  if (Number.isNaN(parsed) || parsed <= 0) return fallback
+  return parsed
+}
+
+const messageQueue = new MessageQueue({
+  maxConcurrentUsers: readPositiveIntEnv('MAX_CONCURRENT_USERS', 50),
+  maxQueueDepthPerUser: readPositiveIntEnv('MAX_QUEUE_DEPTH_PER_USER', 5),
+})
+
+const telegramWebhookDeduper = new WebhookDeduper({ ttlMs: 5 * 60 * 1000 })
 
 await server.register(cors)
 
@@ -47,21 +67,59 @@ server.get('/health', async () => ({
 // Generic webhook handler for all channels
 // ============================================
 
-async function handleChannelMessage(adapter: ChannelAdapter, body: unknown) {
-  const message = adapter.parseWebhook(body)
-  if (!message) return { ok: true }
+function getChannelJobId(message: ChannelMessage): string {
+  const metadata = message.metadata ?? {}
+  const messageId = typeof metadata.messageId === 'string' ? metadata.messageId : null
+  return messageId ?? `${message.channel}:${message.timestamp.getTime()}`
+}
 
+async function enqueueUserTask(
+  userId: string,
+  jobId: string,
+  task: () => Promise<void>,
+  onOverflow?: () => Promise<void>,
+): Promise<void> {
   try {
-    const response = await handleMessage(message.channel, message.userId, message.text)
-    if (response.media?.length && adapter.sendMedia) {
-      await adapter.sendMedia(message.chatId, response.media)
-    }
-    await adapter.sendMessage(message.chatId, response.text)
-    return { ok: true }
+    await messageQueue.enqueue({ userId, jobId, task })
   } catch (error) {
-    server.log.error(error, `Failed to handle ${adapter.name} message`)
-    return { ok: false }
+    if (error instanceof QueueOverflowError) {
+      server.log.warn({ userId, jobId, queueDepth: error.queueDepth }, 'Queue overflow, sending soft backpressure message')
+      if (onOverflow) {
+        await onOverflow().catch(overflowError => {
+          server.log.error(overflowError, 'Failed to send queue overflow response')
+        })
+      }
+      return
+    }
+
+    throw error
   }
+}
+
+function runDetached(label: string, task: () => Promise<void>): void {
+  void task().catch(error => {
+    server.log.error(error, label)
+  })
+}
+
+async function processChannelMessage(adapter: ChannelAdapter, body: unknown): Promise<void> {
+  const message = adapter.parseWebhook(body)
+  if (!message) return
+
+  await enqueueUserTask(
+    message.userId,
+    getChannelJobId(message),
+    async () => {
+      const response = await handleMessage(message.channel, message.userId, message.text)
+      if (response.media?.length && adapter.sendMedia) {
+        await adapter.sendMedia(message.chatId, response.media)
+      }
+      await adapter.sendMessage(message.chatId, response.text)
+    },
+    async () => {
+      await adapter.sendMessage(message.chatId, DEFAULT_QUEUE_OVERFLOW_MESSAGE)
+    },
+  )
 }
 
 // ============================================
@@ -189,6 +247,214 @@ async function sendVenue(chatId: string, place: {
   })
 }
 
+async function processTelegramCallbackQuery(query: any): Promise<void> {
+  const chatId = String(query?.message?.chat?.id ?? '')
+  const userId = String(query?.from?.id ?? '')
+  const callbackId = String(query?.id ?? '')
+  const data = typeof query?.data === 'string' ? query.data : ''
+
+  if (!chatId || !userId || !data || !callbackId) {
+    return
+  }
+
+  await tgFetch('answerCallbackQuery', { callback_query_id: callbackId })
+
+  await enqueueUserTask(
+    userId,
+    `telegram:callback:${callbackId}`,
+    async () => {
+      const { handleCallbackAction } = await import('./character/callback-handler.js')
+      const response = await handleCallbackAction('telegram', userId, data)
+
+      if (!response?.text) {
+        return
+      }
+
+      if (response.choices?.length) {
+        await sendTelegramWithKeyboard(chatId, response.text, {
+          inline_keyboard: response.choices.map(choice => [{ text: choice.label, callback_data: choice.action }]),
+        })
+        return
+      }
+
+      await channels.telegram.sendMessage(chatId, response.text)
+    },
+    async () => {
+      await channels.telegram.sendMessage(chatId, DEFAULT_QUEUE_OVERFLOW_MESSAGE)
+    },
+  )
+}
+
+async function processTelegramLocationMessage(message: any): Promise<void> {
+  const userId = String(message?.from?.id ?? '')
+  const chatId = String(message?.chat?.id ?? '')
+  const messageId = String(message?.message_id ?? 'location')
+
+  if (!userId || !chatId || !message?.location) {
+    return
+  }
+
+  await enqueueUserTask(
+    userId,
+    `telegram:location:${messageId}`,
+    async () => {
+      const { latitude, longitude } = message.location
+      const address = await reverseGeocode(latitude, longitude)
+      const user = await getOrCreateUser('telegram', userId)
+      await saveUserLocation(user.userId, address)
+      setLiveUserLocation(userId, { address, lat: latitude, lng: longitude, source: 'gps' })
+
+      const pending = pendingLocationStore.get(userId)
+      pendingLocationStore.delete(userId)
+
+      await dismissKeyboard(chatId, pick(LOCATION_ACKS)(address))
+
+      if (!pending) {
+        await channels.telegram.sendMessage(chatId, 'Lovely — location saved ✅ What should I call you?')
+        return
+      }
+
+      const originalQuery = pending.originalMessage || ''
+      const retriggerMsg = originalQuery
+        ? `${originalQuery.replace(/near\s+me/i, '').trim()} near ${address}`
+        : `near ${address}`
+
+      sendChatAction(chatId, 'find_location')
+      const response = await handleMessage('telegram', userId, retriggerMsg)
+
+      if (response.media?.length && channels.telegram.sendMedia) {
+        await channels.telegram.sendMedia(chatId, response.media)
+      }
+      await channels.telegram.sendMessage(chatId, response.text)
+    },
+    async () => {
+      await channels.telegram.sendMessage(chatId, DEFAULT_QUEUE_OVERFLOW_MESSAGE)
+    },
+  )
+}
+
+async function processTelegramTextMessage(body: any): Promise<void> {
+  const adapter = channels.telegram
+  const parsedMessage = adapter.parseWebhook(body)
+  if (!parsedMessage) return
+
+  const chatId = parsedMessage.chatId
+  const msgText = parsedMessage.text
+  const jobId = `telegram:text:${String(body?.message?.message_id ?? parsedMessage.timestamp.getTime())}`
+
+  await enqueueUserTask(
+    parsedMessage.userId,
+    jobId,
+    async () => {
+      sendChatAction(chatId, typingActionFor(msgText))
+
+      let placeholderMsgId: number | null = null
+      if (needsPlaceholder(msgText)) {
+        const res = await tgFetch('sendMessage', {
+          chat_id: chatId,
+          text: placeholderFor(msgText),
+        })
+        placeholderMsgId = res?.result?.message_id ?? null
+      }
+
+      const response = await handleMessage(parsedMessage.channel, parsedMessage.userId, msgText)
+
+      if (placeholderMsgId) {
+        if (response.requestLocation || response.media?.length || response._buttons?.length) {
+          await tgFetch('deleteMessage', { chat_id: chatId, message_id: placeholderMsgId })
+          placeholderMsgId = null
+        } else {
+          await tgFetch('editMessageText', {
+            chat_id: chatId,
+            message_id: placeholderMsgId,
+            text: response.text,
+            parse_mode: 'HTML',
+          })
+        }
+      }
+
+      if (response.media?.length && adapter.sendMedia) {
+        await adapter.sendMedia(chatId, response.media)
+      }
+
+      if (!placeholderMsgId || response.media?.length) {
+        if (response.requestLocation) {
+          await sendTelegramWithKeyboard(chatId, response.text, {
+            keyboard: [[{ text: '📍 Share my location', request_location: true }]],
+            resize_keyboard: true,
+            one_time_keyboard: true,
+          })
+          const user = await getOrCreateUser(parsedMessage.channel, parsedMessage.userId)
+          if (user.authenticated) {
+            pendingLocationStore.set(parsedMessage.userId, {
+              toolHint: 'food_grocery',
+              chatId,
+              originalMessage: msgText,
+            })
+          }
+        } else if (response._buttons?.length) {
+          await sendTelegramWithKeyboard(chatId, response.text, {
+            inline_keyboard: response._buttons,
+          })
+        } else {
+          await adapter.sendMessage(chatId, response.text)
+        }
+      }
+
+      if (response.venues?.length && !response.media?.length) {
+        await Promise.all(response.venues.slice(0, 3).map(venue => sendVenue(chatId, venue)))
+      }
+    },
+    async () => {
+      await adapter.sendMessage(chatId, DEFAULT_QUEUE_OVERFLOW_MESSAGE)
+    },
+  )
+}
+
+async function processTelegramWebhook(body: any): Promise<void> {
+  if (body?.callback_query) {
+    await processTelegramCallbackQuery(body.callback_query)
+    return
+  }
+
+  if (body?.message_reaction) {
+    const reaction = body.message_reaction
+    const chatId = String(reaction.chat?.id ?? '')
+    const userId = String(reaction.user?.id ?? '')
+    const positiveEmoji = ['🔥', '👍', '❤️', '😍', '🤩', '🫡', '💯']
+    const isPositive = (reaction.new_reaction ?? [])
+      .some((r: any) => r.type === 'emoji' && positiveEmoji.includes(r.emoji))
+
+    if (isPositive && chatId && userId) {
+      setTimeout(async () => {
+        const followUps = [
+          'Glad you liked it da! 😄 Want me to find more like this?',
+          'Right? This city is unhinged in the best way 🔥 Want directions or delivery options?',
+          'Aye! Should I check if it\'s open / bookable right now?',
+        ]
+        await channels.telegram.sendMessage(chatId, pick(followUps))
+      }, 8000)
+    }
+    return
+  }
+
+  const message = body?.message
+  if (message?.location) {
+    try {
+      await processTelegramLocationMessage(message)
+    } catch (error) {
+      const chatId = String(message?.chat?.id ?? '')
+      server.log.error(error, 'Failed to handle Telegram location message')
+      if (chatId) {
+        await channels.telegram.sendMessage(chatId, pick(LOCATION_ERRORS))
+      }
+    }
+    return
+  }
+
+  await processTelegramTextMessage(body)
+}
+
 // ============================================
 // Randomised Aria acknowledgment strings
 // ============================================
@@ -229,187 +495,16 @@ server.post('/webhook/telegram', async (request, reply) => {
   }
 
   const body = request.body as any
-
-  // ── Inline button tap (callback_query) ─────────────────────────────────────
-  if (body?.callback_query) {
-    const query = body.callback_query
-    const chatId = String(query.message?.chat?.id ?? '')
-    const userId = String(query.from?.id ?? '')
-    const data: string = query.data ?? ''
-
-    // Acknowledge immediately — removes spinner on button
-    await tgFetch('answerCallbackQuery', { callback_query_id: query.id })
-
-    if (chatId && userId && data) {
-      const { handleCallbackAction } = await import('./character/callback-handler.js')
-      const response = await handleCallbackAction('telegram', userId, data)
-      if (response?.text) {
-        if (response.choices?.length) {
-          // Send with inline keyboard so the next step's buttons are interactive
-          await sendTelegramWithKeyboard(chatId, response.text, {
-            inline_keyboard: response.choices.map(c => [{ text: c.label, callback_data: c.action }]),
-          })
-        } else {
-          await channels.telegram.sendMessage(chatId, response.text)
-        }
-      }
-    }
-    return { ok: true }
+  const dedupKey = extractTelegramWebhookDedupKey(body)
+  if (dedupKey && !telegramWebhookDeduper.rememberIfNew(dedupKey)) {
+    server.log.info({ dedupKey }, 'Skipping duplicate Telegram webhook')
+    return reply.code(200).send({ ok: true, duplicate: true })
   }
 
-  // ── Emoji reaction on a message ────────────────────────────────────────────
-  if (body?.message_reaction) {
-    const reaction = body.message_reaction
-    const chatId = String(reaction.chat?.id ?? '')
-    const userId = String(reaction.user?.id ?? '')
-    const positiveEmoji = ['🔥', '👍', '❤️', '😍', '🤩', '🫡', '💯']
-    const isPositive = (reaction.new_reaction ?? [])
-      .some((r: any) => r.type === 'emoji' && positiveEmoji.includes(r.emoji))
-
-    if (isPositive && chatId && userId) {
-      setTimeout(async () => {
-        const followUps = [
-          'Glad you liked it da! 😄 Want me to find more like this?',
-          'Right? This city is unhinged in the best way 🔥 Want directions or delivery options?',
-          'Aye! Should I check if it\'s open / bookable right now?',
-        ]
-        await channels.telegram.sendMessage(chatId, pick(followUps))
-      }, 8000) // 8s feels natural, not instant-bot
-    }
-    return { ok: true }
-  }
-
-  const message = body?.message
-
-  // ── GPS location share ─────────────────────────────────────────────────────
-  if (message?.location) {
-    const userId = message.from?.id?.toString()
-    const chatId = message.chat?.id?.toString()
-    if (!userId || !chatId) return { ok: true }
-
-    const { latitude, longitude } = message.location
-
-    try {
-      const address = await reverseGeocode(latitude, longitude)
-      const user = await getOrCreateUser('telegram', userId)
-      await saveUserLocation(user.userId, address)
-      setLiveUserLocation(userId, { address, lat: latitude, lng: longitude, source: 'gps' })
-
-      const pending = pendingLocationStore.get(userId)
-      pendingLocationStore.delete(userId)
-
-      // Dismiss the GPS share keyboard + confirm in Aria's voice
-      await dismissKeyboard(chatId, pick(LOCATION_ACKS)(address))
-
-      if (pending) {
-        const originalQuery = pending.originalMessage || ''
-        const retriggerMsg = originalQuery
-          ? `${originalQuery.replace(/near\s+me/i, '').trim()} near ${address}`
-          : `near ${address}`
-
-        sendChatAction(chatId, 'find_location')
-        const response = await handleMessage('telegram', userId, retriggerMsg)
-
-        if (response.media?.length && channels.telegram.sendMedia) {
-          await channels.telegram.sendMedia(chatId, response.media)
-        }
-        await channels.telegram.sendMessage(chatId, response.text)
-      } else {
-        await channels.telegram.sendMessage(chatId, 'Lovely — location saved ✅ What should I call you?')
-      }
-    } catch (err) {
-      server.log.error(err, 'Failed to handle Telegram location message')
-      await channels.telegram.sendMessage(chatId, pick(LOCATION_ERRORS))
-    }
-    return { ok: true }
-  }
-
-  // ── Normal text message ────────────────────────────────────────────────────
-  const adapter = channels.telegram
-  const parsedMessage = adapter.parseWebhook(body)
-  if (!parsedMessage) return { ok: true }
-
-  const chatId = parsedMessage.chatId
-  const msgText = parsedMessage.text
-
-  try {
-    // Fire typing indicator immediately — before anything else runs
-    sendChatAction(chatId, typingActionFor(msgText))
-
-    // Send a placeholder bubble for lookups and any substantive conversational message
-    let placeholderMsgId: number | null = null
-    if (needsPlaceholder(msgText)) {
-      const res = await tgFetch('sendMessage', {
-        chat_id: chatId,
-        text: placeholderFor(msgText),
-      })
-      placeholderMsgId = res?.result?.message_id ?? null
-    }
-
-    const response = await handleMessage(parsedMessage.channel, parsedMessage.userId, msgText)
-
-    // Replace placeholder in-place, or delete it when we need a fresh send
-    if (placeholderMsgId) {
-      if (response.requestLocation || response.media?.length || response._buttons?.length) {
-        // requestLocation needs a ReplyKeyboard; media/buttons can't replace a text message —
-        // delete the placeholder so the proper message goes out fresh below
-        await tgFetch('deleteMessage', { chat_id: chatId, message_id: placeholderMsgId })
-        placeholderMsgId = null
-      } else {
-        // Edit text message in-place — no chat clutter
-        await tgFetch('editMessageText', {
-          chat_id: chatId,
-          message_id: placeholderMsgId,
-          text: response.text,
-          parse_mode: 'HTML',
-        })
-      }
-    }
-
-    // Send media (only if placeholder was deleted or there was no placeholder)
-    if (response.media?.length && adapter.sendMedia) {
-      await adapter.sendMedia(chatId, response.media)
-    }
-
-    // Send text response (only when not already edited into placeholder)
-    if (!placeholderMsgId || response.media?.length) {
-      if (response.requestLocation) {
-        await sendTelegramWithKeyboard(chatId, response.text, {
-          keyboard: [[{ text: '📍 Share my location', request_location: true }]],
-          resize_keyboard: true,
-          one_time_keyboard: true,
-        })
-        const user = await getOrCreateUser(parsedMessage.channel, parsedMessage.userId)
-        if (user.authenticated) {
-          pendingLocationStore.set(parsedMessage.userId, {
-            toolHint: 'food_grocery',
-            chatId,
-            originalMessage: msgText,
-          })
-        }
-      } else if (response._buttons?.length) {
-        // Onboarding / social bridge inline keyboard buttons
-        await sendTelegramWithKeyboard(chatId, response.text, {
-          inline_keyboard: response._buttons,
-        })
-      } else {
-        await adapter.sendMessage(chatId, response.text)
-      }
-    }
-
-    // Drop map venue pins ONLY when no photos are being sent.
-    // When real photos exist (from Google Places), venue pins just add visual clutter.
-    if (response.venues?.length && !(response.media?.length)) {
-      for (const venue of response.venues.slice(0, 3)) {
-        await sendVenue(chatId, venue)
-      }
-    }
-
-  } catch (error) {
-    server.log.error(error, 'Failed to handle Telegram message')
-  }
-
-  return { ok: true }
+  await reply.code(200).send({ ok: true })
+  runDetached('Failed to process Telegram webhook', async () => {
+    await processTelegramWebhook(body)
+  })
 })
 
 // ============================================
@@ -431,7 +526,11 @@ server.post('/webhook/whatsapp', async (request, reply) => {
   if (!channels.whatsapp.isEnabled()) {
     return { ok: false, error: 'WhatsApp not configured' }
   }
-  return handleChannelMessage(channels.whatsapp, request.body)
+
+  await reply.code(200).send({ ok: true })
+  runDetached('Failed to process WhatsApp webhook', async () => {
+    await processChannelMessage(channels.whatsapp, request.body)
+  })
 })
 
 // ============================================
@@ -484,7 +583,10 @@ server.post('/webhook/slack', async (request, reply) => {
     return { ok: false, error: 'Slack not configured' }
   }
 
-  return handleChannelMessage(channels.slack, body)
+  await reply.code(200).send({ ok: true })
+  runDetached('Failed to process Slack webhook', async () => {
+    await processChannelMessage(channels.slack, body)
+  })
 })
 
 // ============================================
